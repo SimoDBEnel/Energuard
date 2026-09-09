@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 from bias_detector import BiasDetector
 from utils_io import carica_csv
 
-SOGLIA = 0.35   # soglia decisionale: da discutere e giustificare in model card
+SOGLIA = 0.3   # soglia decisionale: da discutere e giustificare in model card
 
 df = carica_csv("energuard_dataset.csv")
 y = df["guasto_entro_30gg"]
