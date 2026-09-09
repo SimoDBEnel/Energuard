@@ -237,9 +237,6 @@ with summary_cols[1]:
     st.metric("Attività bloccate", len(bloccate_stop), delta=f"{len(om.stop_attivi)} filtri di stop")
 with summary_cols[2]:
     st.metric("Escalation SLA", len(in_escalation), delta=f"SLA {om.sla_minuti} min")
-with summary_cols[3]:
-    ok, n = audit.verifica_catena()
-    st.metric("Registro audit", "OK" if ok else "ATTENZIONE", delta=f"{n} eventi")
 
 st.info("Regola operativa: lavora solo le attività in attesa. Quelle bloccate da stop non devono essere eseguite finché non viene ripresa l'attività.")
 review_feedback = st.session_state.pop("review_feedback", None)
@@ -429,6 +426,15 @@ def stato_filtro_leggibile(stato):
     return f"{colore} {stato_leggibile(stato)}"
 
 
+def data_leggibile(timestamp):
+    if not timestamp or timestamp == "-":
+        return "-"
+    try:
+        return datetime.fromisoformat(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return str(timestamp)[:19]
+
+
 def dentro_finestra_temporale(record, filtro):
     if filtro == "Tutto":
         return True
@@ -449,12 +455,12 @@ def dentro_finestra_temporale(record, filtro):
     return True
 
 
-def filtra_records_audit(records, categorie, stati, attori, finestra, testo):
+def filtra_records_audit(records, stati, supervisioni, attori, finestra, testo):
     filtrati = [r for r in records if dentro_finestra_temporale(r, finestra)]
-    if categorie:
-        filtrati = [r for r in filtrati if categoria_evento_audit(r.get("evento")) in categorie]
     if stati:
         filtrati = [r for r in filtrati if (r.get("decisione", {}).get("stato") or "Senza stato") in stati]
+    if supervisioni:
+        filtrati = [r for r in filtrati if (r.get("decisione", {}).get("livello") or "Senza supervisione") in supervisioni]
     if attori:
         filtrati = [r for r in filtrati if (r.get("attore") or "-") in attori]
     if testo:
@@ -579,7 +585,6 @@ def tabella_kpi(records):
         ["C3", "Override per sottogruppo", override_area, "Esposto", "Da monitorare"],
         ["C4", "Drift performance", "Non esposto nella vista attuale", "Grafico + alert", "Da completare"],
         ["D1", "Completezza audit trail", "Transizioni principali loggate", "100%", "Da campionare"],
-        ["D2", "Integrità log", "Verificata" if ok else "Compromessa", "Integra", "OK" if ok else "Allarme"],
         ["D3", "Ricostruibilità decisione", "Tabella + popup dettaglio + download JSON", "< 60 sec", "OK"],
     ]
     return pd.DataFrame(righe, columns=["Codice", "KPI", "Valore attuale", "Target", "Stato"])
@@ -639,7 +644,7 @@ with tab_coda:
             )
         with f2:
             filtro_regime = st.multiselect(
-                "Regime",
+                "Supervisione",
                 ["HIC", "HITL", "HOTL"],
                 key="filtro_attivita_regime"
             )
@@ -696,7 +701,7 @@ with tab_coda:
                 with left:
                     st.markdown(f"**Rischio stimato:** {r.prob_guasto:.2f}")
                     st.markdown(f"**Confidenza modello:** {r.confidenza:.2f}")
-                    st.markdown(f"**Regime di lavorazione:** {r.livello.value}")
+                    st.markdown(f"**Supervisione:** {r.livello.value}")
                     st.markdown(f"**SLA:** {testo_sla(r)}")
                     st.markdown(f"**Stato:** {r.stato.value}")
                     st.markdown(f"**Utenza:** {r.criticita_utenza}")
@@ -841,31 +846,14 @@ with tab_kpi:
 
 # ----------------------------------------------------------------------
 with tab_audit:
-    ok, n = audit.verifica_catena()
-    st.metric("Integrità catena audit", "VERIFICATA" if ok else "COMPROMESSA",
-              delta=f"{n} record")
-
+    st.subheader("Registro audit")
     log_path = "audit_trail.jsonl"
     if not os.path.exists(log_path):
         st.info("Nessun evento di audit registrato ancora.")
     else:
-        records = []
-        with open(log_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                evento = record.get("evento", "")
-                if "llm" in evento.lower():
-                    continue
-                records.append(record)
+        records = carica_records_audit(log_path)
 
         if records:
-            records = sorted(records, key=lambda r: r.get("timestamp", ""), reverse=True)
             st.download_button(
                 "Scarica log JSON",
                 data=json.dumps(records, ensure_ascii=False, indent=2),
@@ -880,19 +868,11 @@ with tab_audit:
                 default="Tutto",
                 key="audit_filtro_tempo",
             )
-            categorie_disponibili = sorted({categoria_evento_audit(r.get("evento")) for r in records})
             stati_disponibili = sorted({r.get("decisione", {}).get("stato") or "Senza stato" for r in records})
+            supervisioni_disponibili = sorted({r.get("decisione", {}).get("livello") or "Senza supervisione" for r in records})
             attori_disponibili = sorted({r.get("attore") or "-" for r in records})
 
-            f_evento, f_stato = st.columns(2)
-            with f_evento:
-                filtro_categorie = st.pills(
-                    "Attività svolta",
-                    categorie_disponibili,
-                    selection_mode="multi",
-                    key="audit_filtro_categorie",
-                    wrap=True,
-                )
+            f_stato, f_supervisione = st.columns(2)
             with f_stato:
                 filtro_stati = st.pills(
                     "Esito/Stato",
@@ -900,6 +880,14 @@ with tab_audit:
                     selection_mode="multi",
                     format_func=stato_filtro_leggibile,
                     key="audit_filtro_stati",
+                    wrap=True,
+                )
+            with f_supervisione:
+                filtro_supervisioni = st.pills(
+                    "Supervisione",
+                    supervisioni_disponibili,
+                    selection_mode="multi",
+                    key="audit_filtro_supervisioni",
                     wrap=True,
                 )
 
@@ -921,8 +909,8 @@ with tab_audit:
 
             records = filtra_records_audit(
                 records,
-                filtro_categorie or [],
                 filtro_stati or [],
+                filtro_supervisioni or [],
                 filtro_attori or [],
                 filtro_tempo or "Tutto",
                 filtro_testo_audit,
@@ -935,11 +923,10 @@ with tab_audit:
                 righe_log.append({
                     "idx": i,
                     "attivita": decisione.get("asset_id") or extra.get("asset_id") or "SISTEMA",
-                    "attivita svolta": evento_leggibile(record.get("evento", "-")),
                     "stato": stato_leggibile(decisione.get("stato", "-")),
-                    "livello": decisione.get("livello", "-"),
+                    "Supervisione": decisione.get("livello", "-"),
                     "operatore/sistema": record.get("attore", "-"),
-                    "quando": record.get("timestamp", "-"),
+                    "Data": data_leggibile(record.get("timestamp", "-")),
                 })
 
             st.caption(f"Mostrati {len(righe_log)} log audit. Seleziona una riga per aprire il dettaglio completo.")
@@ -951,7 +938,7 @@ with tab_audit:
                     tabella_log,
                     width="stretch",
                     hide_index=True,
-                    column_order=["attivita", "attivita svolta", "stato", "livello", "operatore/sistema", "quando"],
+                    column_order=["attivita", "stato", "Supervisione", "operatore/sistema", "Data"],
                     on_select=richiedi_apertura_dettaglio_log,
                     selection_mode="single-row",
                     key="tabella_audit",
