@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+modello.joblib
+predizioni.csv
+audit_trail.jsonl
+venv/
