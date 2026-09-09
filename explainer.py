@@ -251,7 +251,6 @@ class SpiegatoreLLM:
                              f"llm:{self.cfg.descrizione()}", int((time.time() - t0) * 1000),
                              {"cache_key": chiave})
             self.chiamate["ok"] += 1
-            self._log("SISTEMA", "spiegazione_llm_ok", rec, sp)
         except Exception as e:  # qualunque errore: rete, quota, JSON malformato, guardrail
             sp = self._fallback(rec, fattori, f"{type(e).__name__}: {str(e)[:120]}")
         if self.cache is not None:
@@ -263,7 +262,6 @@ class SpiegatoreLLM:
         sp = self.fallback.spiega(rec, fattori)
         sp.fonte = f"template(fallback:{motivo})"
         self.chiamate["fallback"] += 1
-        self._log("SISTEMA", "spiegazione_fallback_template", rec, sp)
         return sp
 
     def _log(self, attore, evento, rec, sp):

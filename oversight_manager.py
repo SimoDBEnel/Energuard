@@ -16,9 +16,9 @@ TODO per il team:
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Optional
+from typing import Iterable, Optional
 import uuid
 
 
@@ -58,6 +58,10 @@ class Raccomandazione:
     stato: StatoDecisione = StatoDecisione.IN_ATTESA
     revisore: Optional[str] = None
     motivazione: Optional[str] = None
+    evidenze_keywords: list[str] = field(default_factory=list)
+    honeypot: bool = False
+    honeypot_messaggio: Optional[str] = None
+    messaggio_llm: Optional[dict] = None
 
 
 class OversightManager:
@@ -68,7 +72,40 @@ class OversightManager:
         self.soglia_rischio = soglia_rischio_alto
         self.sla_minuti = sla_minuti
         self.coda: list[Raccomandazione] = []
-        self.stop_attivi: set[str] = set()   # es. {"area:Sud", "tipo:linea_AT", "GLOBALE"}
+        self.stop_attivi: set[str] = set()  # es. {"area:Sud", "tipo:linea_AT", "GLOBALE"}
+        self._storico_motivazioni: list[tuple[datetime, str]] = []
+
+    @staticmethod
+    def _normalizza_motivazione(motivazione: str) -> str:
+        return " ".join(motivazione.strip().split()).casefold()
+
+    def _valida_motivazione(self, motivazione: str, *, consentire_duplicati: bool = False):
+        if motivazione is None:
+            raise ValueError("Motivazione obbligatoria (minimo 15 caratteri).")
+        testo = motivazione.strip()
+        if len(testo) < 15:
+            raise ValueError("Motivazione obbligatoria (minimo 15 caratteri). "
+                             "Senza motivazione non c'e' audit trail.")
+        if len(testo.split()) <= 2:
+            raise ValueError("Motivazione obbligatoria: inserire piu' di 2 parole.")
+        if not consentire_duplicati:
+            normalized = self._normalizza_motivazione(testo)
+            limite = datetime.now() - timedelta(minutes=30)
+            recenti = [m for ts, m in self._storico_motivazioni if ts >= limite]
+            if any(self._normalizza_motivazione(m) == normalized for m in recenti):
+                raise ValueError("Motivazione duplicata negli ultimi 30 minuti. "
+                                 "Inserire un testo originale e specifico.")
+        return testo
+
+    @staticmethod
+    def _valida_evidenze_keywords(esito: StatoDecisione, evidenze_keywords: Optional[list[str]]):
+        if esito not in (StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA):
+            return []
+        keywords = [k.strip() for k in (evidenze_keywords or []) if k and k.strip()]
+        if len(set(keywords)) < 2:
+            raise ValueError("Prima di approvare devi selezionare almeno 2 parole chiave "
+                             "dell'evidenza esaminata.")
+        return keywords
 
     # ------------------------------------------------------------------
     # ROUTING - il cuore dell'esercizio
@@ -114,15 +151,24 @@ class OversightManager:
 
     def revisiona(self, decision_id: str, esito: StatoDecisione,
                   revisore: str, motivazione: str,
-                  azione_modificata: Optional[str] = None):
+                  azione_modificata: Optional[str] = None,
+                  evidenze_keywords: Optional[list[str]] = None):
         """Registra il giudizio umano. La motivazione e' OBBLIGATORIA."""
-        if not motivazione or len(motivazione.strip()) < 15:
-            raise ValueError("Motivazione obbligatoria (minimo 15 caratteri). "
-                             "Senza motivazione non c'e' audit trail.")
+        testo = self._valida_motivazione(motivazione)
+        keywords = self._valida_evidenze_keywords(esito, evidenze_keywords)
         r = self._trova(decision_id)
-        if r.stato != StatoDecisione.IN_ATTESA:
+        if r.stato not in (StatoDecisione.IN_ATTESA, StatoDecisione.ESCALATION):
             raise ValueError(f"Decisione {decision_id} gia' chiusa: {r.stato}")
-        r.stato, r.revisore, r.motivazione = esito, revisore, motivazione
+        if r.honeypot and esito == StatoDecisione.APPROVATA:
+            r.revisore, r.motivazione, r.evidenze_keywords = revisore, testo, keywords
+            self.audit.log(revisore, "allerta_honeypot_approvato", r,
+                           extra={"messaggio": r.honeypot_messaggio})
+            self._storico_motivazioni.append((datetime.now(), testo))
+            raise ValueError("ALLERTA RUBBER STAMPING: questa raccomandazione era "
+                             "un controllo honeypot palesemente incoerente.")
+        r.stato, r.revisore, r.motivazione = esito, revisore, testo
+        r.evidenze_keywords = keywords
+        self._storico_motivazioni.append((datetime.now(), testo))
         if azione_modificata:
             r.azione_proposta = azione_modificata
         if esito in (StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA):
@@ -130,26 +176,108 @@ class OversightManager:
         self.audit.log(revisore, f"revisione_{esito.value}", r)
         return r
 
+    def minuti_residui_sla(self, r: Raccomandazione, adesso: Optional[datetime] = None) -> Optional[int]:
+        if r.livello != LivelloSupervisione.HITL:
+            return None
+        if r.stato not in (StatoDecisione.IN_ATTESA, StatoDecisione.ESCALATION):
+            return None
+        adesso = adesso or datetime.now()
+        creata = datetime.fromisoformat(r.creata_il)
+        scadenza = creata + timedelta(minutes=self.sla_minuti)
+        return int((scadenza - adesso).total_seconds() // 60)
+
+    def aggiorna_sla(self, adesso: Optional[datetime] = None) -> int:
+        adesso = adesso or datetime.now()
+        escalate = 0
+        for r in self.coda:
+            minuti_residui = self.minuti_residui_sla(r, adesso)
+            if r.stato == StatoDecisione.IN_ATTESA and minuti_residui is not None and minuti_residui < 0:
+                r.stato = StatoDecisione.ESCALATION
+                self.audit.log("SISTEMA", "escalation_sla_scaduto", r,
+                               extra={"sla_minuti": self.sla_minuti,
+                                      "minuti_ritardo": abs(minuti_residui)})
+                escalate += 1
+        return escalate
+
     # ------------------------------------------------------------------
     # EMERGENCY STOP - deve bloccare DAVVERO (la giuria lo verifica)
     # ------------------------------------------------------------------
     def attiva_stop(self, ambito: str, operatore: str, motivazione: str):
         """ambito: 'GLOBALE' | 'area:<nome>' | 'tipo:<tipo_asset>'"""
-        self.stop_attivi.add(ambito)
-        self.audit.log(operatore, f"emergency_stop_ON:{ambito}",
-                       None, extra={"motivazione": motivazione})
-        # TODO: le decisioni gia' in coda che ricadono nell'ambito
-        # devono passare a BLOCCATA_STOP, non restare eseguibili.
+        return self.attiva_stop_filtri([ambito], operatore, motivazione)
+
+    def attiva_stop_filtri(self, ambiti: Iterable[str], operatore: str, motivazione: str):
+        """Attiva uno stop su uno o piu' ambiti e blocca la coda gia' esposta."""
+        testo = self._valida_motivazione(motivazione, consentire_duplicati=True)
+        ambiti_norm = self._normalizza_ambiti(ambiti)
+        for ambito in ambiti_norm:
+            self.stop_attivi.add(ambito)
+            self.audit.log(operatore, f"emergency_stop_ON:{ambito}",
+                           None, extra={"motivazione": testo})
+        decisioni_bloccate = self._blocca_decisioni_in_stop()
+        if len(ambiti_norm) > 1:
+            self.audit.log(operatore, "emergency_stop_ON_multiplo", None,
+                           extra={"ambiti": ambiti_norm,
+                                  "motivazione": testo,
+                                  "decisioni_bloccate": decisioni_bloccate})
+        self._storico_motivazioni.append((datetime.now(), testo))
+        return decisioni_bloccate
 
     def disattiva_stop(self, ambito: str, operatore: str, motivazione: str):
-        self.stop_attivi.discard(ambito)
-        self.audit.log(operatore, f"emergency_stop_OFF:{ambito}",
-                       None, extra={"motivazione": motivazione})
+        return self.disattiva_stop_filtri([ambito], operatore, motivazione)
+
+    def disattiva_stop_filtri(self, ambiti: Iterable[str], operatore: str, motivazione: str):
+        testo = self._valida_motivazione(motivazione, consentire_duplicati=True)
+        ambiti_norm = self._normalizza_ambiti(ambiti)
+        for ambito in ambiti_norm:
+            self.stop_attivi.discard(ambito)
+            self.audit.log(operatore, f"emergency_stop_OFF:{ambito}",
+                           None, extra={"motivazione": testo})
+        decisioni_ripristinate = self._ripristina_decisioni_fuori_stop()
+        if len(ambiti_norm) > 1:
+            self.audit.log(operatore, "emergency_stop_OFF_multiplo", None,
+                           extra={"ambiti": ambiti_norm,
+                                  "motivazione": testo,
+                                  "decisioni_ripristinate": decisioni_ripristinate})
+        self._storico_motivazioni.append((datetime.now(), testo))
+        return decisioni_ripristinate
+
+    @staticmethod
+    def _normalizza_ambiti(ambiti: Iterable[str]) -> list[str]:
+        normalizzati = []
+        for ambito in ambiti:
+            testo = str(ambito).strip()
+            if testo and testo not in normalizzati:
+                normalizzati.append(testo)
+        if not normalizzati:
+            raise ValueError("Selezionare almeno un filtro per l'emergency stop.")
+        return normalizzati
 
     def _stop_applicabile(self, r: Raccomandazione) -> bool:
         return ("GLOBALE" in self.stop_attivi
                 or f"area:{r.area_geografica}" in self.stop_attivi
                 or f"tipo:{r.tipo_asset}" in self.stop_attivi)
+
+    def _blocca_decisioni_in_stop(self) -> int:
+        bloccate = 0
+        for r in self.coda:
+            if r.stato == StatoDecisione.IN_ATTESA and self._stop_applicabile(r):
+                r.stato = StatoDecisione.BLOCCATA_STOP
+                self.audit.log("SISTEMA", "blocco_emergency_stop_attivato", r,
+                               extra={"stop_attivi": sorted(self.stop_attivi)})
+                bloccate += 1
+        return bloccate
+
+    def _ripristina_decisioni_fuori_stop(self) -> int:
+        ripristinate = 0
+        for r in self.coda:
+            if r.stato == StatoDecisione.BLOCCATA_STOP and not self._stop_applicabile(r):
+                r.stato = StatoDecisione.IN_ATTESA
+                self.audit.log("SISTEMA", "ripristino_post_emergency_stop", r,
+                               extra={"stop_attivi": sorted(self.stop_attivi)})
+                ripristinate += 1
+        return ripristinate
+
 
     # ------------------------------------------------------------------
     def _esegui(self, r: Raccomandazione):

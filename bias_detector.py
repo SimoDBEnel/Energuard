@@ -73,6 +73,47 @@ class BiasDetector:
                 f"storico nei dati (variabile proxy).")
         return out
 
-    # TODO avanzato: equalized odds difference, calibrazione per gruppo
-    # (probabilita' media predetta vs tasso osservato: se divergono in un solo
-    # gruppo, sospettare label bias nei dati storici).
+    def calibrazione_per_gruppo(self, df: pd.DataFrame, col_gruppo: str,
+                               col_y: str = "y_true",
+                               col_proba: str = "proba") -> pd.DataFrame:
+        """Confronta probabilita' media prevista e frequenza osservata di guasto."""
+        righe = []
+        for gruppo, sub in df.groupby(col_gruppo):
+            pred_media = float(sub[col_proba].mean()) if not sub.empty else 0.0
+            osservato = float(sub[col_y].mean()) if not sub.empty else 0.0
+            righe.append({
+                col_gruppo: gruppo,
+                "predizione_media": round(pred_media, 3),
+                "osservato_media": round(osservato, 3),
+                "differenza": round(osservato - pred_media, 3),
+                "brier_score": round(((sub[col_proba] - sub[col_y]) ** 2).mean(), 3),
+                "n": len(sub),
+            })
+        return pd.DataFrame(righe).sort_values("differenza", ascending=False)
+
+    def drift_temporale(self, df: pd.DataFrame, col_gruppo: str,
+                        col_y: str = "y_true", col_proba: str = "proba",
+                        finestra: int = 20) -> pd.DataFrame:
+        """Stima un drift sintetico in pseudo-tempo, utile quando non esiste un timestamp."""
+        out = []
+        for gruppo, sub in df.groupby(col_gruppo):
+            sub = sub.sort_values(by=["asset_id"], kind="mergesort").reset_index(drop=True)
+            for start in range(0, len(sub), finestra):
+                blocco = sub.iloc[start:start + finestra]
+                if len(blocco) < max(5, finestra // 2):
+                    continue
+                pred_media = float(blocco[col_proba].mean())
+                osservato = float(blocco[col_y].mean())
+                out.append({
+                    col_gruppo: gruppo,
+                    "window_start": start,
+                    "window_end": start + len(blocco) - 1,
+                    "predizione_media": round(pred_media, 3),
+                    "osservato_media": round(osservato, 3),
+                    "drift": round(osservato - pred_media, 3),
+                    "n": len(blocco),
+                })
+        return pd.DataFrame(out)
+
+    # TODO avanzato: equalized odds difference, rispetto ai gruppi protetti,
+    # offset temporale reale con timestamp di produzione.

@@ -42,6 +42,8 @@ class AuditLogger:
                 "confidenza": raccomandazione.confidenza,
                 "motivazione": raccomandazione.motivazione,
             }
+            if getattr(raccomandazione, "messaggio_llm", None):
+                record["decisione"]["messaggio_llm"] = raccomandazione.messaggio_llm
         if extra:
             record["extra"] = extra
         record["hash"] = self._hash(record)

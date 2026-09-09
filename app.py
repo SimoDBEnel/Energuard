@@ -9,18 +9,112 @@ documento "Indicatori di Qualita'"). Il come le realizzate e' scelta
 vostra: Streamlit e' solo il default comodo, potete usare React/Gradio.
 """
 
+import json
+import os
+from datetime import datetime, timedelta
+from random import Random
+
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 from audit_logger import AuditLogger
 from explainer import ConfigLLM, crea_spiegatore, estrai_fattori
-from bias_detector import BiasDetector
 from utils_io import carica_csv
 from oversight_manager import (OversightManager, Raccomandazione,
                                StatoDecisione, AZIONI)
 
-st.set_page_config(page_title="EnerGuard | Supervisione Umana",
+st.set_page_config(page_title="EnerGuard | Console Operatore",
                    layout="wide", page_icon="⚡")
+
+PASTEL_REGIME_COLORS = {
+    "HOTL": "#a7d8b5",
+    "HITL": "#f6c99b",
+    "HIC": "#f3a6a6",
+}
+PASTEL_AREA_COLORS = ["#8ecae6", "#b8b8ff", "#ffd6a5", "#cdb4db"]
+PASTEL_THRESHOLD = "#9c7a5d"
+
+st.markdown(
+    """
+    <style>
+    :root {
+        --eg-bg: #f7f4ef;
+        --eg-surface: #fffdf8;
+        --eg-surface-soft: #f1ebe3;
+        --eg-text: #31413d;
+        --eg-muted: #6f7f78;
+        --eg-accent: #8bb7a2;
+        --eg-accent-strong: #5f927b;
+        --eg-warn: #f6c99b;
+        --eg-danger: #f3a6a6;
+        --eg-border: #ded6ca;
+    }
+
+    .stApp {
+        background: linear-gradient(180deg, var(--eg-bg) 0%, #eef5f1 52%, #f7f4ef 100%);
+        color: var(--eg-text);
+    }
+
+    h1, h2, h3, .stMarkdown, .stCaption, label {
+        color: var(--eg-text) !important;
+    }
+
+    [data-testid="stSidebar"] {
+        background: #efe8dd;
+        border-right: 1px solid var(--eg-border);
+    }
+
+    [data-testid="stMetric"], div[data-testid="stExpander"] {
+        background: rgba(255, 253, 248, 0.86);
+        border: 1px solid var(--eg-border);
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(95, 111, 101, 0.08);
+        padding: 0.6rem;
+    }
+
+    .stButton > button {
+        border-radius: 10px;
+        border: 1px solid var(--eg-accent);
+        background: #d8eadf;
+        color: #2f5144;
+    }
+
+    .stButton > button[kind="primary"] {
+        background: var(--eg-accent);
+        color: #ffffff;
+        border-color: var(--eg-accent-strong);
+    }
+
+    .stButton > button:disabled {
+        background: #ebe5dc;
+        color: var(--eg-muted);
+        border-color: var(--eg-border);
+    }
+
+    [data-baseweb="tab-list"] {
+        gap: 0.35rem;
+    }
+
+    [data-baseweb="tab"] {
+        background: rgba(255, 253, 248, 0.72);
+        border-radius: 10px 10px 0 0;
+        color: var(--eg-muted);
+    }
+
+    [data-baseweb="tab"][aria-selected="true"] {
+        background: #dcefe6;
+        color: #2f5144;
+    }
+
+    div[data-testid="stAlert"] {
+        border-radius: 12px;
+        border-color: var(--eg-border);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ----------------------------------------------------------------------
@@ -43,13 +137,38 @@ def bootstrap():
             spiegazione=[],  # TODO: riempire con SHAP/feature importance
         )
         om.sottometti(r)
+    # Honeypot anti rubber-stamping: casi palesemente incoerenti inseriti nel flusso.
+    candidati_honeypot = pred[(pred["y_true"] == 0) & (pred["y_pred"] == 0)].nsmallest(6, "proba")
+    for _, riga in candidati_honeypot.sample(
+            n=min(2, len(candidati_honeypot)), random_state=Random().randint(1, 999999)
+    ).iterrows():
+        r = Raccomandazione(
+            asset_id=f"HP-{riga['asset_id']}",
+            tipo_asset=riga["tipo_asset"],
+            area_geografica=riga["area_geografica"],
+            criticita_utenza="standard",
+            prob_guasto=round(float(riga["proba"]), 3),
+            confidenza=round(float(riga["confidenza"]), 3),
+            azione_proposta="ispezione_urgente",
+            spiegazione=[],
+            honeypot=True,
+            honeypot_messaggio="Rischio molto basso, utenza standard e nessuna evidenza critica: approvare l'urgenza indica possibile rubber stamping.",
+        )
+        om.sottometti(r)
     return om, audit, pred, spiegatore
 
 
 om, audit, pred, spiegatore = bootstrap()
 
-st.title("EnerGuard · Dashboard di Supervisione Umana")
+st.title("EnerGuard · Console operatore")
+st.caption("Vista unica per capire cosa lavorare, cosa è bloccato e quali decisioni richiedono controllo umano.")
 operatore = st.sidebar.text_input("ID operatore", value="OP-001")
+
+st.markdown(
+    """
+    **Lettura rapida:** controlla prima i quattro indicatori in alto, poi lavora le attività in attesa, infine usa la mappa per vedere dove si concentrano rischio e bassa confidenza.
+    """
+)
 
 # --- EMERGENCY STOP: sempre visibile, mai a piu' di un click ---
 st.sidebar.divider()
@@ -58,18 +177,73 @@ st.sidebar.caption(
     f"Motore spiegazioni: **{'LLM · ' + _cfg.descrizione() if _cfg.attivo else 'template locale'}**"
     + ("" if _cfg.attivo else "  \nConfigurate .env (vedi .env.example) per usare un LLM esterno."))
 
-st.sidebar.subheader("Emergency stop")
-ambito = st.sidebar.selectbox("Ambito", ["GLOBALE", "area:Sud", "area:Nord",
-                                         "area:Centro", "area:Isole",
-                                         "tipo:linea_AT", "tipo:trasformatore"])
-mot_stop = st.sidebar.text_input("Motivazione stop")
+st.sidebar.subheader("Stop operativo")
+sidebar_feedback = st.session_state.pop("sidebar_feedback", None)
+if sidebar_feedback:
+    st.sidebar.success(sidebar_feedback)
+opzioni_stop = (
+    ["GLOBALE"]
+    + [f"area:{area}" for area in sorted(pred["area_geografica"].dropna().unique())]
+    + [f"tipo:{tipo}" for tipo in sorted(pred["tipo_asset"].dropna().unique())]
+)
+ambiti_stop = st.sidebar.multiselect(
+    "Blocca per area o tipo asset",
+    opzioni_stop,
+    default=["GLOBALE"],
+    help="Puoi selezionare piu' filtri: lo stop verra' applicato a tutte le decisioni che rientrano in almeno uno di questi ambiti."
+)
+mot_stop = st.sidebar.text_input("Motivo dello stop")
 c1, c2 = st.sidebar.columns(2)
-if c1.button("ATTIVA", type="primary"):
-    om.attiva_stop(ambito, operatore, mot_stop or "non fornita")  # TODO: rendere obbligatoria
-if c2.button("Disattiva"):
-    om.disattiva_stop(ambito, operatore, mot_stop or "non fornita")
+if c1.button("STOP", type="primary"):
+    try:
+        if hasattr(om, "attiva_stop_filtri"):
+            decisioni_bloccate = om.attiva_stop_filtri(ambiti_stop, operatore, mot_stop)
+        else:
+            decisioni_bloccate = 0
+            for ambito in ambiti_stop:
+                om.attiva_stop(ambito, operatore, mot_stop)
+        st.session_state["sidebar_feedback"] = f"Stop attivato su {len(ambiti_stop)} filtri. Decisioni bloccate: {decisioni_bloccate}."
+        st.rerun()
+    except ValueError as e:
+        st.sidebar.error(str(e))
+if c2.button("RIPRENDI"):
+    try:
+        if hasattr(om, "disattiva_stop_filtri"):
+            decisioni_ripristinate = om.disattiva_stop_filtri(ambiti_stop, operatore, mot_stop)
+        else:
+            decisioni_ripristinate = 0
+            for ambito in ambiti_stop:
+                om.disattiva_stop(ambito, operatore, mot_stop)
+        st.session_state["sidebar_feedback"] = f"Stop disattivato su {len(ambiti_stop)} filtri. Attivita ripristinate: {decisioni_ripristinate}."
+        st.rerun()
+    except ValueError as e:
+        st.sidebar.error(str(e))
 if om.stop_attivi:
-    st.sidebar.error(f"STOP ATTIVI: {', '.join(sorted(om.stop_attivi))}")
+    st.sidebar.error(f"FILTRI DI STOP ATTIVI: {', '.join(sorted(om.stop_attivi))}")
+
+nuove_escalation = om.aggiorna_sla() if hasattr(om, "aggiorna_sla") else 0
+if nuove_escalation:
+    st.warning(f"{nuove_escalation} attività HITL hanno superato lo SLA e sono in escalation.")
+
+stati_lavorabili = {StatoDecisione.IN_ATTESA, StatoDecisione.ESCALATION}
+pendenti = [r for r in om.coda if r.stato in stati_lavorabili]
+bloccate_stop = [r for r in om.coda if r.stato == StatoDecisione.BLOCCATA_STOP]
+in_escalation = [r for r in om.coda if r.stato == StatoDecisione.ESCALATION]
+summary_cols = st.columns(4)
+with summary_cols[0]:
+    st.metric("Attività da lavorare", len(pendenti))
+with summary_cols[1]:
+    st.metric("Attività bloccate", len(bloccate_stop), delta=f"{len(om.stop_attivi)} filtri di stop")
+with summary_cols[2]:
+    st.metric("Escalation SLA", len(in_escalation), delta=f"SLA {om.sla_minuti} min")
+with summary_cols[3]:
+    ok, n = audit.verifica_catena()
+    st.metric("Registro audit", "OK" if ok else "ATTENZIONE", delta=f"{n} eventi")
+
+st.info("Regola operativa: lavora solo le attività in attesa. Quelle bloccate da stop non devono essere eseguite finché non viene ripresa l'attività.")
+review_feedback = st.session_state.pop("review_feedback", None)
+if review_feedback:
+    st.success(review_feedback)
 
 @st.cache_data(show_spinner=False)
 def _fattori_asset(asset_id: str):
@@ -78,7 +252,8 @@ def _fattori_asset(asset_id: str):
     modello = joblib.load("modello.joblib")
     df = carica_csv("energuard_dataset.csv")
     X = pd.get_dummies(df.drop(columns=["asset_id", "guasto_entro_30gg"]))
-    x = X.loc[df["asset_id"] == asset_id].iloc[0]
+    asset_origine = asset_id.removeprefix("HP-")
+    x = X.loc[df["asset_id"] == asset_origine].iloc[0]
     return estrai_fattori(modello, x, list(X.columns))
 
 
@@ -88,65 +263,388 @@ def spiegazione_per(r):
            "criticita_utenza": r.criticita_utenza, "prob_guasto": r.prob_guasto,
            "confidenza": r.confidenza, "azione_proposta": r.azione_proposta,
            "livello": getattr(r.livello, "value", None), "soglia_confidenza": om.soglia_conf}
-    return spiegatore.spiega(rec, _fattori_asset(r.asset_id))
+    sp = spiegatore.spiega(rec, _fattori_asset(r.asset_id))
+    r.messaggio_llm = {
+        "testo": sp.testo,
+        "incertezza": sp.incertezza,
+        "fonte": sp.fonte,
+        "latenza_ms": sp.latenza_ms,
+    }
+    return sp
 
 
-tab_coda, tab_matrice, tab_bias, tab_audit = st.tabs(
-    ["Coda decisioni", "Matrice confidenza × rischio", "Bias & drift", "Audit trail"])
+def parole_chiave_revisione(r):
+    parole = [
+        f"asset {r.asset_id}",
+        f"area {r.area_geografica}",
+        f"tipo {r.tipo_asset}",
+        f"utenza {r.criticita_utenza}",
+        f"rischio {r.prob_guasto:.2f}",
+        f"confidenza {r.confidenza:.2f}",
+        r.azione_proposta.replace("_", " "),
+    ]
+    if r.honeypot:
+        parole.extend(["rischio basso", "azione urgente incoerente"])
+    return list(dict.fromkeys(parole))
+
+
+def cooldown_pronto(decision_id: str, secondi: int = 10):
+    key = f"cooldown_{decision_id}"
+    if key not in st.session_state:
+        st.session_state[key] = datetime.now()
+    elapsed = datetime.now() - st.session_state[key]
+    residuo = max(0, secondi - int(elapsed.total_seconds()))
+    return elapsed >= timedelta(seconds=secondi), residuo
+
+
+def testo_sla(r):
+    if not hasattr(om, "minuti_residui_sla"):
+        return "SLA non disponibile"
+    minuti = om.minuti_residui_sla(r)
+    if minuti is None:
+        return "SLA non applicabile"
+    if r.stato == StatoDecisione.ESCALATION:
+        return f"SLA scaduto da {abs(minuti)} min"
+    if minuti <= 5:
+        return f"SLA urgente: {max(minuti, 0)} min"
+    return f"SLA: {minuti} min"
+
+
+def classe_sla(r):
+    if r.stato == StatoDecisione.ESCALATION:
+        return "Scaduto"
+    if not hasattr(om, "minuti_residui_sla"):
+        return "Non applicabile"
+    minuti = om.minuti_residui_sla(r)
+    if minuti is None:
+        return "Non applicabile"
+    if minuti <= 5:
+        return "Urgente"
+    return "Nei tempi"
+
+
+def filtra_attivita(attivita, testo, regimi, aree, tipi, sla, solo_honeypot):
+    filtrate = attivita
+    if testo:
+        testo_norm = testo.strip().casefold()
+        filtrate = [
+            r for r in filtrate
+            if testo_norm in r.asset_id.casefold()
+            or testo_norm in r.tipo_asset.casefold()
+            or testo_norm in r.area_geografica.casefold()
+        ]
+    if regimi:
+        filtrate = [r for r in filtrate if r.livello.value in regimi]
+    if aree:
+        filtrate = [r for r in filtrate if r.area_geografica in aree]
+    if tipi:
+        filtrate = [r for r in filtrate if r.tipo_asset in tipi]
+    if sla:
+        filtrate = [r for r in filtrate if classe_sla(r) in sla]
+    if solo_honeypot:
+        filtrate = [r for r in filtrate if r.honeypot]
+    return filtrate
+
+
+@st.dialog("Dettaglio log audit")
+def mostra_dettaglio_log(record):
+    decisione = record.get("decisione", {})
+    messaggio_llm = decisione.get("messaggio_llm")
+    c_log, c_dec = st.columns(2)
+    with c_log:
+        st.markdown(f"**logId:** {record.get('hash', '-')}")
+        st.markdown(f"**Timestamp:** {record.get('timestamp', '-')}")
+        st.markdown(f"**Attore:** {record.get('attore', '-')}")
+        st.markdown(f"**Evento:** {record.get('evento', '-')}")
+        st.markdown(f"**Hash precedente:** {record.get('hash_precedente', '-')}")
+    with c_dec:
+        st.markdown(f"**Asset:** {decisione.get('asset_id', '-')}")
+        st.markdown(f"**Decision ID:** {decisione.get('id', '-')}")
+        st.markdown(f"**Livello:** {decisione.get('livello', '-')}")
+        st.markdown(f"**Stato:** {decisione.get('stato', '-')}")
+        st.markdown(f"**Azione:** {decisione.get('azione', '-')}")
+        st.markdown(f"**Motivazione:** {decisione.get('motivazione', '-')}")
+
+    if messaggio_llm:
+        st.markdown("**Messaggio LLM associato**")
+        st.markdown(f"**Fonte:** {messaggio_llm.get('fonte', '-')}")
+        st.markdown(f"**Latenza:** {messaggio_llm.get('latenza_ms', '-')} ms")
+        st.write(messaggio_llm.get("testo", "-"))
+        st.caption(messaggio_llm.get("incertezza", ""))
+
+    if record.get("extra"):
+        st.markdown("**Extra**")
+        st.json(record["extra"])
+
+    st.markdown("**Record JSON completo**")
+    st.json(record)
+
+
+tab_coda, tab_matrice, tab_audit = st.tabs(
+    ["Attività da lavorare", "Mappa rischio per regione", "Registro audit"])
 
 # ----------------------------------------------------------------------
 with tab_coda:
-    pendenti = [r for r in om.coda if r.stato == StatoDecisione.IN_ATTESA]
-    st.metric("Decisioni in attesa di revisione umana", len(pendenti))
-    for r in sorted(pendenti, key=lambda x: -x.prob_guasto)[:10]:
-        with st.expander(
-                f"{'🔴' if r.livello.value == 'HIC' else '🟠'} {r.asset_id} · "
-                f"{r.tipo_asset} · {r.area_geografica} · "
-                f"P(guasto)={r.prob_guasto} · conf={r.confidenza} · {r.livello.value}"):
-            st.write(f"Azione proposta: **{r.azione_proposta}** · "
-                     f"Utenza: {r.criticita_utenza}")
-            sp = spiegazione_per(r)
-            st.markdown(sp.testo)
-            st.warning(sp.incertezza)
-            st.caption(f"Fonte spiegazione: {sp.fonte} · {sp.latenza_ms} ms")
-            mot = st.text_area("Motivazione (obbligatoria)", key=f"m{r.id}")
-            az = st.selectbox("Azione", AZIONI,
-                              index=AZIONI.index(r.azione_proposta), key=f"a{r.id}")
-            b1, b2, b3 = st.columns(3)
-            try:
-                if b1.button("Approva", key=f"ok{r.id}"):
-                    om.revisiona(r.id, StatoDecisione.APPROVATA, operatore, mot)
-                if b2.button("Modifica e approva", key=f"mod{r.id}"):
-                    om.revisiona(r.id, StatoDecisione.MODIFICATA, operatore, mot,
-                                 azione_modificata=az)
-                if b3.button("Rifiuta", key=f"no{r.id}"):
-                    om.revisiona(r.id, StatoDecisione.RIFIUTATA, operatore, mot)
-            except ValueError as e:
-                st.error(str(e))
+    pendenti = [r for r in om.coda if r.stato in stati_lavorabili]
+    st.subheader("Attività da verificare")
+    if not pendenti:
+        st.success("Nessuna decisione in attesa. Il sistema è stabile e non ci sono revisioni pending.")
+    else:
+        st.markdown("**Filtri rapidi**")
+        f1, f2, f3 = st.columns([1.1, 1, 1])
+        with f1:
+            filtro_testo = st.text_input(
+                "Cerca attività",
+                placeholder="Asset, area o tipo asset",
+                key="filtro_attivita_testo"
+            )
+        with f2:
+            filtro_regime = st.multiselect(
+                "Regime",
+                ["HIC", "HITL", "HOTL"],
+                key="filtro_attivita_regime"
+            )
+        with f3:
+            filtro_sla = st.multiselect(
+                "SLA",
+                ["Scaduto", "Urgente", "Nei tempi", "Non applicabile"],
+                key="filtro_attivita_sla"
+            )
+
+        f4, f5, f6 = st.columns([1, 1, 0.8])
+        with f4:
+            filtro_area = st.multiselect(
+                "Area",
+                sorted({r.area_geografica for r in pendenti}),
+                key="filtro_attivita_area"
+            )
+        with f5:
+            filtro_tipo = st.multiselect(
+                "Tipo asset",
+                sorted({r.tipo_asset for r in pendenti}),
+                key="filtro_attivita_tipo"
+            )
+        with f6:
+            solo_honeypot = st.checkbox("Solo controlli", key="filtro_attivita_honeypot")
+
+        pendenti_filtrati = filtra_attivita(
+            pendenti,
+            filtro_testo,
+            filtro_regime,
+            filtro_area,
+            filtro_tipo,
+            filtro_sla,
+            solo_honeypot,
+        )
+        st.caption(f"Mostrate {len(pendenti_filtrati)} attività su {len(pendenti)} lavorabili.")
+
+        pendenti_ordinati = sorted(
+            pendenti_filtrati,
+            key=lambda x: (x.stato != StatoDecisione.ESCALATION, -x.prob_guasto)
+        )
+        visibili = pendenti_ordinati[:10]
+        honeypot_nascosti = [r for r in pendenti_ordinati if r.honeypot and r not in visibili]
+        visibili.extend(honeypot_nascosti)
+        if not visibili:
+            st.info("Nessuna attività corrisponde ai filtri selezionati.")
+        for r in visibili:
+            livello_emoji = {"HIC": "🔴", "HITL": "🟠", "HOTL": "🟡"}
+            livello_label = {"HIC": "Decide solo l'operatore", "HITL": "Serve conferma", "HOTL": "Solo monitoraggio"}
+            descrizione_lavorabilita = f"{r.livello.value} - {livello_label.get(r.livello.value, 'Da verificare')}"
+            with st.expander(
+                    f"{livello_emoji.get(r.livello.value, '⚪')} {descrizione_lavorabilita} · {testo_sla(r)} · {r.asset_id} · {r.tipo_asset} · {r.area_geografica}", expanded=r.stato == StatoDecisione.ESCALATION):
+                left, right = st.columns([1.3, 1.7])
+                with left:
+                    st.markdown(f"**Rischio stimato:** {r.prob_guasto:.2f}")
+                    st.markdown(f"**Confidenza modello:** {r.confidenza:.2f}")
+                    st.markdown(f"**Regime di lavorazione:** {r.livello.value}")
+                    st.markdown(f"**SLA:** {testo_sla(r)}")
+                    st.markdown(f"**Stato:** {r.stato.value}")
+                    st.markdown(f"**Utenza:** {r.criticita_utenza}")
+                    st.markdown(f"**Azione consigliata:** {r.azione_proposta}")
+                with right:
+                    st.markdown(f"**Esito richiesto:** {livello_label.get(r.livello.value, 'Da verificare')}")
+                    sp = spiegazione_per(r)
+                    st.markdown("**Motivazione operativa:**")
+                    st.write(sp.testo)
+                    st.warning(sp.incertezza)
+                    st.caption(f"Fonte: {sp.fonte} · {sp.latenza_ms} ms")
+
+                mot = st.text_area("Motivazione dell'operatore", key=f"m{r.id}", help="Scrivere una descrizione chiara di perché si approva, modifica o rifiuta la decisione.")
+                az = st.selectbox("Azione da applicare", AZIONI,
+                                  index=AZIONI.index(r.azione_proposta), key=f"a{r.id}")
+                keywords = st.multiselect(
+                    "Elementi verificati prima dell'approvazione",
+                    parole_chiave_revisione(r),
+                    key=f"kw{r.id}",
+                    help="Selezionare almeno due parole chiave che giustificano la scelta."
+                )
+                cooldown_ok, cooldown_residuo = cooldown_pronto(r.id)
+                approvazione_disabilitata = not cooldown_ok or len(set(keywords)) < 2
+                if not cooldown_ok:
+                    st.caption(f"Cooldown anti rubber-stamping: approvazione disponibile tra {cooldown_residuo} secondi.")
+                if len(set(keywords)) < 2:
+                    st.caption("Selezionare almeno 2 parole chiave dell'evidenza prima di approvare o modificare.")
+                b1, b2, b3 = st.columns(3)
+                try:
+                    if b1.button("Approva", key=f"ok{r.id}", disabled=approvazione_disabilitata):
+                        om.revisiona(r.id, StatoDecisione.APPROVATA, operatore, mot,
+                                     evidenze_keywords=keywords)
+                        st.session_state["review_feedback"] = f"Decisione {r.asset_id} approvata."
+                        st.rerun()
+                    if b2.button("Modifica e approva", key=f"mod{r.id}", disabled=approvazione_disabilitata):
+                        om.revisiona(r.id, StatoDecisione.MODIFICATA, operatore, mot,
+                                     azione_modificata=az, evidenze_keywords=keywords)
+                        st.session_state["review_feedback"] = f"Decisione {r.asset_id} modificata e approvata."
+                        st.rerun()
+                    if b3.button("Rifiuta", key=f"no{r.id}"):
+                        om.revisiona(r.id, StatoDecisione.RIFIUTATA, operatore, mot)
+                        st.session_state["review_feedback"] = f"Decisione {r.asset_id} rifiutata."
+                        st.rerun()
+                except ValueError as e:
+                    st.error(str(e))
+                if not mot or len(mot.strip()) < 15:
+                    st.caption("Motivazione obbligatoria: minimo 15 caratteri.")
 
 # ----------------------------------------------------------------------
 with tab_matrice:
-    st.subheader("Dove decide l'AI e dove serve l'umano")
-    st.scatter_chart(pred.rename(columns={"proba": "rischio"}),
-                     x="confidenza", y="rischio", color="area_geografica")
-    st.caption("TODO: sovrapporre le soglie di routing HIC/HITL/HOTL e colorare "
-               "le zone. L'operatore deve capire A COLPO D'OCCHIO in quale "
-               "regime opera ogni decisione.")
+    st.subheader("Mappa rischio per regione")
+    st.caption("Ogni grafico mostra una regione. I punti piu' in alto sono piu' rischiosi; i punti piu' a sinistra hanno meno confidenza del modello.")
+    df_plot = pred.rename(columns={"proba": "rischio"}).copy()
+    df_plot["confidenza"] = pd.to_numeric(df_plot["confidenza"], errors="coerce")
+    df_plot["rischio"] = pd.to_numeric(df_plot["rischio"], errors="coerce")
+    regioni = sorted(df_plot["area_geografica"].dropna().unique())
+    colori_regioni = {
+        area: PASTEL_AREA_COLORS[i % len(PASTEL_AREA_COLORS)]
+        for i, area in enumerate(regioni)
+    }
 
-# ----------------------------------------------------------------------
-with tab_bias:
-    bd = BiasDetector()
-    valut = pred.rename(columns={})
-    m = bd.metriche_per_gruppo(valut, "area_geografica")
-    st.dataframe(m, use_container_width=True)
-    for a in bd.allerte(m, "area_geografica"):
-        st.warning(a)
-    st.caption("TODO: aggiungere trend temporale (drift), tasso di override "
-               "umano per area, calibrazione per gruppo.")
+    zone_df = pd.DataFrame([
+        {"regime": "HOTL", "x_min": 0.80, "x_max": 1.00, "y_min": 0.00, "y_max": 0.60},
+        {"regime": "HITL", "x_min": 0.00, "x_max": 1.00, "y_min": 0.60, "y_max": 1.00},
+        {"regime": "HIC", "x_min": 0.00, "x_max": 0.80, "y_min": 0.00, "y_max": 1.00},
+    ])
+
+    zones = (
+        alt.Chart(zone_df)
+        .mark_rect(opacity=0.34)
+        .encode(
+            x=alt.X("x_min:Q", scale=alt.Scale(domain=[0, 1])),
+            x2="x_max:Q",
+            y=alt.Y("y_min:Q", scale=alt.Scale(domain=[0, 1])),
+            y2="y_max:Q",
+            color=alt.Color("regime:N", scale=alt.Scale(domain=list(PASTEL_REGIME_COLORS), range=list(PASTEL_REGIME_COLORS.values())), legend=alt.Legend(title="Regime")),
+            tooltip=["regime:N"]
+        )
+    )
+
+    labels = alt.Chart(pd.DataFrame([
+        {"x": 0.90, "y": 0.25, "label": "HOTL\nmonitoraggio"},
+        {"x": 0.50, "y": 0.80, "label": "HITL\nconferma"},
+        {"x": 0.35, "y": 0.35, "label": "HIC\noperatore"},
+    ])).mark_text(fontSize=12, fontWeight="bold", color="#31413d", align="center").encode(
+        x="x:Q",
+        y="y:Q",
+        text="label:N"
+    )
+
+    threshold_v = alt.Chart(pd.DataFrame({"x": [0.80]})).mark_rule(color=PASTEL_THRESHOLD, strokeDash=[6, 4]).encode(x="x:Q")
+    threshold_h = alt.Chart(pd.DataFrame({"y": [0.60]})).mark_rule(color=PASTEL_THRESHOLD, strokeDash=[6, 4]).encode(y="y:Q")
+
+    cols = st.columns(2)
+    for i, area in enumerate(regioni):
+        df_area = df_plot[df_plot["area_geografica"] == area]
+        points = (
+            alt.Chart(df_area)
+            .mark_circle(size=58, opacity=0.82, color=colori_regioni[area])
+            .encode(
+                x=alt.X("confidenza:Q", title="Confidenza", scale=alt.Scale(domain=[0, 1])),
+                y=alt.Y("rischio:Q", title="Rischio", scale=alt.Scale(domain=[0, 1])),
+                tooltip=["asset_id:N", "tipo_asset:N", "confidenza:Q", "rischio:Q"],
+            )
+        )
+        chart = (
+            zones + threshold_v + threshold_h + labels + points
+        ).properties(title=f"Regione {area}", width=410, height=320)
+        with cols[i % 2]:
+            st.altair_chart(chart, use_container_width=True)
+
+    st.caption("Ogni riquadro mostra una sola regione con le stesse soglie operative, così l'operatore può leggere più facilmente il regime di supervisione per area.")
 
 # ----------------------------------------------------------------------
 with tab_audit:
     ok, n = audit.verifica_catena()
     st.metric("Integrità catena audit", "VERIFICATA" if ok else "COMPROMESSA",
               delta=f"{n} record")
-    st.caption("TODO: tabella filtrabile del log per asset/operatore/periodo.")
+
+    log_path = "audit_trail.jsonl"
+    if not os.path.exists(log_path):
+        st.info("Nessun evento di audit registrato ancora.")
+    else:
+        records = []
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                evento = record.get("evento", "")
+                if "llm" in evento.lower():
+                    continue
+                records.append(record)
+
+        if records:
+            records = sorted(records, key=lambda r: r.get("timestamp", ""), reverse=True)
+            st.download_button(
+                "Scarica log JSON",
+                data=json.dumps(records, ensure_ascii=False, indent=2),
+                file_name="audit_trail.json",
+                mime="application/json",
+            )
+
+            df_filtri = pd.DataFrame({
+                "attore": [r.get("attore") for r in records],
+                "evento": [r.get("evento") for r in records],
+            })
+            operatore_filtro = st.selectbox("Filtra per operatore", ["Tutti"] + sorted(df_filtri["attore"].dropna().unique().tolist()))
+            evento_filtro = st.selectbox("Filtra per evento", ["Tutti"] + sorted(df_filtri["evento"].dropna().unique().tolist()))
+
+            if operatore_filtro != "Tutti":
+                records = [r for r in records if r.get("attore") == operatore_filtro]
+            if evento_filtro != "Tutti":
+                records = [r for r in records if r.get("evento") == evento_filtro]
+
+            righe_log = []
+            for i, record in enumerate(records):
+                decisione = record.get("decisione", {})
+                extra = record.get("extra", {})
+                righe_log.append({
+                    "idx": i,
+                    "logId": record.get("hash", "-"),
+                    "attivita": decisione.get("asset_id") or extra.get("asset_id") or "SISTEMA",
+                    "evento": record.get("evento", "-"),
+                    "stato": decisione.get("stato", "-"),
+                    "livello": decisione.get("livello", "-"),
+                    "attore": record.get("attore", "-"),
+                    "timestamp": record.get("timestamp", "-"),
+                })
+
+            st.caption(f"Mostrati {len(righe_log)} log audit. Seleziona una riga per aprire il dettaglio.")
+            tabella_log = pd.DataFrame(righe_log)
+            selezione = st.dataframe(
+                tabella_log,
+                width="stretch",
+                hide_index=True,
+                column_order=["logId", "attivita", "evento", "stato", "livello", "attore", "timestamp"],
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+            if selezione.selection.rows:
+                selected_row = selezione.selection.rows[0]
+                selected_idx = int(tabella_log.iloc[selected_row]["idx"])
+                mostra_dettaglio_log(records[selected_idx])
+        else:
+            st.info("Il file di audit esiste ma non contiene record validi.")
