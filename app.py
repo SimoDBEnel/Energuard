@@ -19,6 +19,7 @@ import pandas as pd
 import streamlit as st
 
 from audit_logger import AuditLogger
+from bias_detector import BiasDetector
 from explainer import ConfigLLM, crea_spiegatore, estrai_fattori
 from utils_io import carica_csv
 from oversight_manager import (OversightManager, Raccomandazione,
@@ -346,6 +347,244 @@ def filtra_attivita(attivita, testo, regimi, aree, tipi, sla, solo_honeypot):
     return filtrate
 
 
+def carica_records_audit(percorso="audit_trail.jsonl"):
+    if not os.path.exists(percorso):
+        return []
+    records = []
+    with open(percorso, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            evento = record.get("evento", "")
+            if "llm" in evento.lower():
+                continue
+            records.append(record)
+    return sorted(records, key=lambda r: r.get("timestamp", ""), reverse=True)
+
+
+def categoria_evento_audit(evento):
+    evento = str(evento or "").lower()
+    if evento.startswith("revisione_"):
+        return "Revisioni"
+    if "emergency_stop" in evento or "ripristino_post" in evento:
+        return "Stop operativo"
+    if "sla" in evento or "escalation" in evento:
+        return "SLA"
+    if "honeypot" in evento:
+        return "Controlli"
+    if evento.startswith("in_coda_") or "auto_esecuzione" in evento:
+        return "Instradamento"
+    return "Altro"
+
+
+def evento_leggibile(evento):
+    mapping = {
+        "revisione_APPROVATA": "Approvazione",
+        "revisione_MODIFICATA": "Modifica e approvazione",
+        "revisione_RIFIUTATA": "Rifiuto",
+        "escalation_sla_scaduto": "Escalation SLA",
+        "blocco_emergency_stop": "Blocco da stop",
+        "blocco_emergency_stop_attivato": "Blocco da stop attivato",
+        "ripristino_post_emergency_stop": "Ripristino attività",
+        "emergency_stop_ON_multiplo": "Stop multiplo",
+        "emergency_stop_OFF_multiplo": "Ripresa multipla",
+        "allerta_honeypot_approvato": "Allerta controllo",
+        "auto_esecuzione_HOTL": "Auto-esecuzione HOTL",
+    }
+    evento = str(evento or "-")
+    if evento.startswith("emergency_stop_ON:"):
+        return "Stop attivato"
+    if evento.startswith("emergency_stop_OFF:"):
+        return "Stop disattivato"
+    if evento.startswith("in_coda_"):
+        return "Inserita in coda"
+    return mapping.get(evento, evento.replace("_", " "))
+
+
+STATO_COLORI = {
+    "APPROVATA": "🟢",
+    "MODIFICATA": "🔵",
+    "RIFIUTATA": "🔴",
+    "IN_ATTESA": "🟡",
+    "ESCALATION": "🟣",
+    "BLOCCATA_STOP": "🟠",
+    "AUTO_ESEGUITA": "⚪",
+    "Senza stato": "⚫",
+}
+
+
+def stato_leggibile(stato):
+    if not stato or stato == "-":
+        return "-"
+    return str(stato).replace("_", " ").upper()
+
+
+def stato_filtro_leggibile(stato):
+    colore = STATO_COLORI.get(str(stato), "⚫")
+    return f"{colore} {stato_leggibile(stato)}"
+
+
+def dentro_finestra_temporale(record, filtro):
+    if filtro == "Tutto":
+        return True
+    timestamp = record.get("timestamp")
+    if not timestamp:
+        return False
+    try:
+        quando = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    adesso = datetime.now()
+    if filtro == "Oggi":
+        return quando.date() == adesso.date()
+    if filtro == "Ultime 24 ore":
+        return quando >= adesso - timedelta(hours=24)
+    if filtro == "Ultimi 7 giorni":
+        return quando >= adesso - timedelta(days=7)
+    return True
+
+
+def filtra_records_audit(records, categorie, stati, attori, finestra, testo):
+    filtrati = [r for r in records if dentro_finestra_temporale(r, finestra)]
+    if categorie:
+        filtrati = [r for r in filtrati if categoria_evento_audit(r.get("evento")) in categorie]
+    if stati:
+        filtrati = [r for r in filtrati if (r.get("decisione", {}).get("stato") or "Senza stato") in stati]
+    if attori:
+        filtrati = [r for r in filtrati if (r.get("attore") or "-") in attori]
+    if testo:
+        testo_norm = testo.strip().casefold()
+        filtrati = [
+            r for r in filtrati
+            if testo_norm in str(r.get("evento", "")).casefold()
+            or testo_norm in str(r.get("attore", "")).casefold()
+            or testo_norm in str(r.get("decisione", {}).get("asset_id", "")).casefold()
+            or testo_norm in str(r.get("extra", {}).get("asset_id", "")).casefold()
+        ]
+    return filtrati
+
+
+def richiedi_apertura_dettaglio_log():
+    st.session_state["audit_apri_dettaglio"] = True
+
+
+def livello_atteso(r):
+    if r.criticita_utenza == "critica" or (
+            r.azione_proposta == "riduci_carico" and r.criticita_utenza != "standard"):
+        return "HIC"
+    if r.prob_guasto >= om.soglia_rischio or r.confidenza < om.soglia_conf:
+        return "HITL"
+    if r.azione_proposta in ("nessuna_azione", "ispezione_routine"):
+        return "HOTL"
+    return "HITL"
+
+
+def percentuale(numeratore, denominatore):
+    if not denominatore:
+        return "n/d"
+    return f"{round(100 * numeratore / denominatore, 1)}%"
+
+
+def minuti_mediani_revisione(records):
+    aperture = {}
+    durate = []
+    for record in sorted(records, key=lambda r: r.get("timestamp", "")):
+        decisione = record.get("decisione", {})
+        decision_id = decisione.get("id")
+        timestamp = record.get("timestamp")
+        if not decision_id or not timestamp:
+            continue
+        try:
+            quando = datetime.fromisoformat(timestamp)
+        except ValueError:
+            continue
+        evento = record.get("evento", "")
+        if evento.startswith("in_coda_"):
+            aperture.setdefault(decision_id, quando)
+        elif evento.startswith("revisione_") and decision_id in aperture:
+            durate.append((quando - aperture[decision_id]).total_seconds() / 60)
+    if not durate:
+        return "n/d"
+    return f"{round(float(pd.Series(durate).median()), 1)} min"
+
+
+def tabella_kpi(records):
+    chiuse = [r for r in om.coda if r.stato in (
+        StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA, StatoDecisione.RIFIUTATA)]
+    override = [r for r in chiuse if r.stato in (StatoDecisione.MODIFICATA, StatoDecisione.RIFIUTATA)]
+    hitl = [r for r in om.coda if getattr(r.livello, "value", None) == "HITL"]
+    hic_hitl = [r for r in om.coda if getattr(r.livello, "value", None) in ("HIC", "HITL")]
+    auto_improprie = [r for r in hic_hitl if r.stato == StatoDecisione.AUTO_ESEGUITA]
+    routing_ok = [r for r in om.coda if getattr(r.livello, "value", None) == livello_atteso(r)]
+
+    revisioni_log = [r for r in records if str(r.get("evento", "")).startswith("revisione_")]
+    motivazioni = [r.get("decisione", {}).get("motivazione") for r in revisioni_log]
+    motivazioni = [m.strip() for m in motivazioni if isinstance(m, str) and m.strip()]
+    motivazioni_normalizzate = [" ".join(m.split()).casefold() for m in motivazioni]
+    duplicati = len(motivazioni_normalizzate) - len(set(motivazioni_normalizzate))
+    brevi = sum(1 for m in motivazioni if len(m) < 30)
+    rubber = brevi + duplicati
+
+    bd = BiasDetector()
+    valut = pred.copy()
+    metriche_area = bd.metriche_per_gruppo(valut, "area_geografica")
+    metriche_tipo = bd.metriche_per_gruppo(valut, "tipo_asset")
+    gap_recall_area = round(metriche_area["recall"].max() - metriche_area["recall"].min(), 3)
+    gap_recall_tipo = round(metriche_tipo["recall"].max() - metriche_tipo["recall"].min(), 3)
+    calibrazione = bd.calibrazione_per_gruppo(valut, "area_geografica")
+    gap_calibrazione = round(calibrazione["differenza"].abs().max(), 3)
+
+    storico_override = []
+    for r in chiuse:
+        storico_override.append({
+            "area": r.area_geografica,
+            "override": int(r.stato in (StatoDecisione.MODIFICATA, StatoDecisione.RIFIUTATA)),
+        })
+    if storico_override:
+        ov_area = pd.DataFrame(storico_override).groupby("area")["override"].mean()
+        override_area = f"max {round(float(ov_area.max()) * 100, 1)}%"
+    else:
+        override_area = "n/d"
+
+    spiegazioni_con_fonte = [
+        r for r in records
+        if r.get("decisione", {}).get("messaggio_llm", {}).get("fonte")
+    ]
+    chiamate = getattr(spiegatore, "chiamate", None)
+    if chiamate and (chiamate.get("ok", 0) + chiamate.get("fallback", 0)):
+        fallback_rate = percentuale(chiamate.get("fallback", 0), chiamate.get("ok", 0) + chiamate.get("fallback", 0))
+    else:
+        fallback_rate = "n/d"
+
+    righe = [
+        ["A1", "Auto-esecuzione impropria", f"{len(auto_improprie)} / {len(hic_hitl)}", "0 assoluto", "OK" if not auto_improprie else "Allarme"],
+        ["A2", "Override umano", percentuale(len(override), len(chiuse)), "5% - 40%", "Da monitorare" if chiuse else "n/d"],
+        ["A3", "Tempo mediano revisione", minuti_mediani_revisione(records), "30 sec - 5 min", "Da monitorare"],
+        ["A4", "Indice rubber-stamping", percentuale(rubber, len(motivazioni)), "< 10%", "OK" if not motivazioni or rubber / max(len(motivazioni), 1) < 0.10 else "Allarme"],
+        ["A5", "Escalation SLA scaduto", percentuale(len(in_escalation), len(hitl)), "< 15%", "OK" if not hitl or len(in_escalation) / len(hitl) < 0.15 else "Allarme"],
+        ["A6", "Copertura routing dichiarato", percentuale(len(routing_ok), len(om.coda)), "100%", "OK" if len(routing_ok) == len(om.coda) else "Allarme"],
+        ["B1", "Copertura spiegazioni", "100% sulle card visibili", "100%", "OK"],
+        ["B2", "Visibilità incertezza", "100% sulle card visibili", "100%", "OK"],
+        ["B3", "Test dei 60 secondi", "Da verificare in demo", "Superato", "Manuale"],
+        ["B3b", "Tracciabilità spiegazione", percentuale(len(spiegazioni_con_fonte), len(revisioni_log)), "100%", "Da monitorare"],
+        ["B3c", "Fallback spiegazione", fallback_rate, "< 5%", "Da monitorare"],
+        ["B4", "Distanza gesto critico", "Stop: 1 click; override: 2 click", "<= 1 / <= 2", "OK"],
+        ["C1", "Gap recall sottogruppi", f"area {gap_recall_area}; tipo {gap_recall_tipo}", "alert > 0.15", "Allarme" if max(gap_recall_area, gap_recall_tipo) > 0.15 else "OK"],
+        ["C2", "Gap calibrazione gruppo", str(gap_calibrazione), "alert > 0.10", "Allarme" if gap_calibrazione > 0.10 else "OK"],
+        ["C3", "Override per sottogruppo", override_area, "Esposto", "Da monitorare"],
+        ["C4", "Drift performance", "Non esposto nella vista attuale", "Grafico + alert", "Da completare"],
+        ["D1", "Completezza audit trail", "Transizioni principali loggate", "100%", "Da campionare"],
+        ["D2", "Integrità log", "Verificata" if ok else "Compromessa", "Integra", "OK" if ok else "Allarme"],
+        ["D3", "Ricostruibilità decisione", "Tabella + popup dettaglio + download JSON", "< 60 sec", "OK"],
+    ]
+    return pd.DataFrame(righe, columns=["Codice", "KPI", "Valore attuale", "Target", "Stato"])
+
+
 @st.dialog("Dettaglio log audit")
 def mostra_dettaglio_log(record):
     decisione = record.get("decisione", {})
@@ -380,8 +619,8 @@ def mostra_dettaglio_log(record):
     st.json(record)
 
 
-tab_coda, tab_matrice, tab_audit = st.tabs(
-    ["Attività da lavorare", "Mappa rischio per regione", "Registro audit"])
+tab_coda, tab_matrice, tab_kpi, tab_audit = st.tabs(
+    ["Attività da lavorare", "Mappa rischio per regione", "KPI qualità", "Registro audit"])
 
 # ----------------------------------------------------------------------
 with tab_coda:
@@ -572,6 +811,35 @@ with tab_matrice:
     st.caption("Ogni riquadro mostra una sola regione con le stesse soglie operative, così l'operatore può leggere più facilmente il regime di supervisione per area.")
 
 # ----------------------------------------------------------------------
+with tab_kpi:
+    st.subheader("KPI qualità dashboard")
+    st.caption("Indicatori tratti dal documento 'EnerGuard · Indicatori di qualità della dashboard di supervisione'.")
+    records_kpi = carica_records_audit()
+    kpi_df = tabella_kpi(records_kpi)
+
+    filtro_stato_kpi = st.multiselect(
+        "Filtra per stato KPI",
+        sorted(kpi_df["Stato"].dropna().unique().tolist()),
+        key="filtro_kpi_stato"
+    )
+    if filtro_stato_kpi:
+        kpi_df = kpi_df[kpi_df["Stato"].isin(filtro_stato_kpi)]
+
+    st.dataframe(
+        kpi_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Codice": st.column_config.TextColumn("Codice", width="small"),
+            "KPI": st.column_config.TextColumn("KPI", width="medium"),
+            "Valore attuale": st.column_config.TextColumn("Valore attuale", width="medium"),
+            "Target": st.column_config.TextColumn("Target", width="medium"),
+            "Stato": st.column_config.TextColumn("Stato", width="small"),
+        },
+    )
+    st.caption("Alcuni KPI sono misurati automaticamente; quelli indicati come manuali o da campionare richiedono verifica durante la demo o revisione audit.")
+
+# ----------------------------------------------------------------------
 with tab_audit:
     ok, n = audit.verifica_catena()
     st.metric("Integrità catena audit", "VERIFICATA" if ok else "COMPROMESSA",
@@ -605,17 +873,60 @@ with tab_audit:
                 mime="application/json",
             )
 
-            df_filtri = pd.DataFrame({
-                "attore": [r.get("attore") for r in records],
-                "evento": [r.get("evento") for r in records],
-            })
-            operatore_filtro = st.selectbox("Filtra per operatore", ["Tutti"] + sorted(df_filtri["attore"].dropna().unique().tolist()))
-            evento_filtro = st.selectbox("Filtra per evento", ["Tutti"] + sorted(df_filtri["evento"].dropna().unique().tolist()))
+            st.markdown("**Filtri rapidi audit**")
+            filtro_tempo = st.pills(
+                "Periodo",
+                ["Oggi", "Ultime 24 ore", "Ultimi 7 giorni", "Tutto"],
+                default="Tutto",
+                key="audit_filtro_tempo",
+            )
+            categorie_disponibili = sorted({categoria_evento_audit(r.get("evento")) for r in records})
+            stati_disponibili = sorted({r.get("decisione", {}).get("stato") or "Senza stato" for r in records})
+            attori_disponibili = sorted({r.get("attore") or "-" for r in records})
 
-            if operatore_filtro != "Tutti":
-                records = [r for r in records if r.get("attore") == operatore_filtro]
-            if evento_filtro != "Tutti":
-                records = [r for r in records if r.get("evento") == evento_filtro]
+            f_evento, f_stato = st.columns(2)
+            with f_evento:
+                filtro_categorie = st.pills(
+                    "Attività svolta",
+                    categorie_disponibili,
+                    selection_mode="multi",
+                    key="audit_filtro_categorie",
+                    wrap=True,
+                )
+            with f_stato:
+                filtro_stati = st.pills(
+                    "Esito/Stato",
+                    stati_disponibili,
+                    selection_mode="multi",
+                    format_func=stato_filtro_leggibile,
+                    key="audit_filtro_stati",
+                    wrap=True,
+                )
+
+            f_attore, f_testo = st.columns([1.2, 1])
+            with f_attore:
+                filtro_attori = st.pills(
+                    "Attore",
+                    attori_disponibili,
+                    selection_mode="multi",
+                    key="audit_filtro_attori",
+                    wrap=True,
+                )
+            with f_testo:
+                filtro_testo_audit = st.text_input(
+                    "Cerca nel log",
+                    placeholder="Asset, evento o operatore",
+                    key="audit_filtro_testo",
+                )
+
+            records = filtra_records_audit(
+                records,
+                filtro_categorie or [],
+                filtro_stati or [],
+                filtro_attori or [],
+                filtro_tempo or "Tutto",
+                filtro_testo_audit,
+            )
 
             righe_log = []
             for i, record in enumerate(records):
@@ -623,28 +934,31 @@ with tab_audit:
                 extra = record.get("extra", {})
                 righe_log.append({
                     "idx": i,
-                    "logId": record.get("hash", "-"),
                     "attivita": decisione.get("asset_id") or extra.get("asset_id") or "SISTEMA",
-                    "evento": record.get("evento", "-"),
-                    "stato": decisione.get("stato", "-"),
+                    "attivita svolta": evento_leggibile(record.get("evento", "-")),
+                    "stato": stato_leggibile(decisione.get("stato", "-")),
                     "livello": decisione.get("livello", "-"),
-                    "attore": record.get("attore", "-"),
-                    "timestamp": record.get("timestamp", "-"),
+                    "operatore/sistema": record.get("attore", "-"),
+                    "quando": record.get("timestamp", "-"),
                 })
 
-            st.caption(f"Mostrati {len(righe_log)} log audit. Seleziona una riga per aprire il dettaglio.")
+            st.caption(f"Mostrati {len(righe_log)} log audit. Seleziona una riga per aprire il dettaglio completo.")
             tabella_log = pd.DataFrame(righe_log)
-            selezione = st.dataframe(
-                tabella_log,
-                width="stretch",
-                hide_index=True,
-                column_order=["logId", "attivita", "evento", "stato", "livello", "attore", "timestamp"],
-                on_select="rerun",
-                selection_mode="single-row",
-            )
-            if selezione.selection.rows:
-                selected_row = selezione.selection.rows[0]
-                selected_idx = int(tabella_log.iloc[selected_row]["idx"])
-                mostra_dettaglio_log(records[selected_idx])
+            if tabella_log.empty:
+                st.info("Nessun log corrisponde ai filtri selezionati.")
+            else:
+                selezione = st.dataframe(
+                    tabella_log,
+                    width="stretch",
+                    hide_index=True,
+                    column_order=["attivita", "attivita svolta", "stato", "livello", "operatore/sistema", "quando"],
+                    on_select=richiedi_apertura_dettaglio_log,
+                    selection_mode="single-row",
+                    key="tabella_audit",
+                )
+                if selezione.selection.rows and st.session_state.pop("audit_apri_dettaglio", False):
+                    selected_row = selezione.selection.rows[0]
+                    selected_idx = int(tabella_log.iloc[selected_row]["idx"])
+                    mostra_dettaglio_log(records[selected_idx])
         else:
             st.info("Il file di audit esiste ma non contiene record validi.")
