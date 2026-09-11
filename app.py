@@ -20,7 +20,7 @@ import streamlit as st
 
 from audit_logger import AuditLogger
 from bias_detector import BiasDetector
-from explainer import ConfigLLM, crea_spiegatore, estrai_fattori
+from explainer import ConfigLLM, Spiegazione, crea_spiegatore, estrai_fattori
 from utils_io import carica_csv
 from oversight_manager import (OversightManager, Raccomandazione,
                                StatoDecisione, AZIONI)
@@ -48,7 +48,9 @@ st.markdown(
         --eg-accent: #8bb7a2;
         --eg-accent-strong: #5f927b;
         --eg-warn: #f6c99b;
-        --eg-danger: #f3a6a6;
+        --eg-danger: #b42318;
+        --eg-danger-dark: #7a271a;
+        --eg-danger-soft: #fef3f2;
         --eg-border: #ded6ca;
     }
 
@@ -59,11 +61,6 @@ st.markdown(
 
     h1, h2, h3, .stMarkdown, .stCaption, label {
         color: var(--eg-text) !important;
-    }
-
-    [data-testid="stSidebar"] {
-        background: #efe8dd;
-        border-right: 1px solid var(--eg-border);
     }
 
     [data-testid="stMetric"], div[data-testid="stExpander"] {
@@ -93,6 +90,142 @@ st.markdown(
         border-color: var(--eg-border);
     }
 
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="textarea"] > div {
+        background: var(--eg-surface) !important;
+        border-color: var(--eg-border) !important;
+    }
+
+    div[data-baseweb="input"] input,
+    div[data-baseweb="textarea"] textarea {
+        color: var(--eg-text) !important;
+        -webkit-text-fill-color: var(--eg-text) !important;
+        caret-color: var(--eg-accent-strong) !important;
+    }
+
+    div[data-baseweb="input"] input::placeholder,
+    div[data-baseweb="textarea"] textarea::placeholder {
+        color: var(--eg-muted) !important;
+        opacity: 1;
+    }
+
+    .st-key-header_operator input:disabled {
+        background: #ebe7df !important;
+        color: #465550 !important;
+        -webkit-text-fill-color: #465550 !important;
+        opacity: 1 !important;
+        cursor: default;
+    }
+
+    button[data-testid="stBaseButton-pills"] {
+        background: #ffffff !important;
+        border: 2px solid #66736d !important;
+        color: #17211d !important;
+        font-weight: 600;
+        opacity: 1 !important;
+    }
+
+    button[data-testid="stBaseButton-pills"] *,
+    button[data-testid="stBaseButton-pillsActive"] * {
+        color: inherit !important;
+        -webkit-text-fill-color: currentColor !important;
+        opacity: 1 !important;
+    }
+
+    button[data-testid="stBaseButton-pills"]:hover,
+    button[data-testid="stBaseButton-pills"]:focus-visible {
+        background: #eef2f0 !important;
+        border-color: #263b34 !important;
+    }
+
+    button[data-testid="stBaseButton-pillsActive"] {
+        background: #245c48 !important;
+        border-color: #163b2e !important;
+        color: #ffffff !important;
+        font-weight: 700;
+        box-shadow: none;
+    }
+
+    .st-key-stop_scope_global button[data-testid="stBaseButton-pillsActive"] {
+        background: #9f1d16 !important;
+        border-color: #65120e !important;
+        color: #ffffff !important;
+    }
+
+    .st-key-stop_cta button {
+        min-height: 3rem;
+        background: var(--eg-danger) !important;
+        border-color: var(--eg-danger) !important;
+        color: #ffffff !important;
+        font-weight: 700;
+    }
+
+    .st-key-stop_cta button:hover,
+    .st-key-stop_cta button:focus-visible {
+        background: var(--eg-danger-dark) !important;
+        border-color: var(--eg-danger-dark) !important;
+    }
+
+    .st-key-stop_panel {
+        background: var(--eg-danger-soft);
+        border: 1px solid #fecdca;
+        border-left: 5px solid var(--eg-danger);
+        padding: 1rem 1.1rem;
+        margin: 0.5rem 0 1rem;
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] {
+        background: var(--eg-surface) !important;
+        color: var(--eg-text) !important;
+        border-top: 6px solid var(--eg-danger);
+        border-left: 1px solid var(--eg-border);
+        border-right: 1px solid var(--eg-border);
+        border-bottom: 1px solid var(--eg-border);
+        box-shadow: 0 20px 55px rgba(49, 65, 61, 0.24);
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] > div,
+    div[data-testid="stDialog"] [role="dialog"] [data-testid="stVerticalBlock"],
+    div[data-testid="stDialog"] [role="dialog"] [data-testid="stMarkdownContainer"] {
+        background: transparent !important;
+        color: var(--eg-text) !important;
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] p,
+    div[data-testid="stDialog"] [role="dialog"] label,
+    div[data-testid="stDialog"] [role="dialog"] span {
+        color: var(--eg-text) !important;
+        -webkit-text-fill-color: var(--eg-text) !important;
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] div[data-testid="stAlert"] {
+        background: #fde7e5 !important;
+        border-color: #d92d20 !important;
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] div[data-testid="stNotification"] {
+        background: #eaf4f8 !important;
+        border-color: #72a9bd !important;
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] .stButton > button:not([kind="primary"]) {
+        background: #ffffff !important;
+        border-color: #66736d !important;
+        color: #17211d !important;
+    }
+
+    div[data-testid="stDialog"] .stButton > button[kind="primary"] {
+        background: var(--eg-danger) !important;
+        border-color: var(--eg-danger) !important;
+        color: #ffffff !important;
+    }
+
+    div[data-testid="stDialog"] .stButton > button[kind="primary"] p,
+    div[data-testid="stDialog"] .stButton > button[kind="primary"] span {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+
     [data-baseweb="tab-list"] {
         gap: 0.35rem;
     }
@@ -119,12 +252,38 @@ st.markdown(
 
 
 # ----------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def _fattori_asset(asset_id: str):
+    """Estrae i fattori SHAP per un asset e li riusa tra i rerun Streamlit."""
+    import joblib
+    modello = joblib.load("modello.joblib")
+    df = carica_csv("energuard_dataset.csv")
+    X = pd.get_dummies(df.drop(columns=["asset_id", "guasto_entro_30gg"]))
+    asset_origine = asset_id.removeprefix("HP-")
+    x = X.loc[df["asset_id"] == asset_origine].iloc[0]
+    return estrai_fattori(modello, x, list(X.columns))
+
+
 @st.cache_resource
 def bootstrap():
     audit = AuditLogger("audit_trail.jsonl")
-    om = OversightManager(audit)
+    om = OversightManager(audit, stop_state_path="oversight_stops.json")
     spiegatore = crea_spiegatore(audit)   # LLM se .env e' configurato, altrimenti template
     pred = carica_csv("predizioni.csv")
+
+    def prepara(r):
+        fattori = _fattori_asset(r.asset_id)
+        r.spiegazione = [(f.nome, f.valore, f.contributo) for f in fattori]
+        rec = {"asset_id": r.asset_id, "tipo_asset": r.tipo_asset,
+               "area_geografica": r.area_geografica, "criticita_utenza": r.criticita_utenza,
+               "prob_guasto": r.prob_guasto, "confidenza": r.confidenza,
+               "azione_proposta": r.azione_proposta, "livello": None,
+               "soglia_confidenza": om.soglia_conf}
+        sp = spiegatore.spiega(rec, fattori)
+        r.messaggio_llm = {"testo": sp.testo, "incertezza": sp.incertezza,
+                           "fonte": sp.fonte, "latenza_ms": sp.latenza_ms}
+        audit.log("SISTEMA", "spiegazione_generata", r,
+                  extra={"fonte": sp.fonte, "latenza_ms": sp.latenza_ms})
     # Trasforma le prime N predizioni positive in raccomandazioni in coda
     for _, riga in pred[pred["y_pred"] == 1].head(40).iterrows():
         r = Raccomandazione(
@@ -134,9 +293,12 @@ def bootstrap():
             criticita_utenza=riga["criticita_utenza"],
             prob_guasto=round(float(riga["proba"]), 3),
             confidenza=round(float(riga["confidenza"]), 3),
-            azione_proposta="programma_manutenzione",  # TODO: derivare da regole
-            spiegazione=[],  # TODO: riempire con SHAP/feature importance
+            azione_proposta=("riduci_carico" if riga["criticita_utenza"] == "critica"
+                             else "ispezione_urgente" if float(riga["proba"]) >= 0.75
+                             else "programma_manutenzione"),
+            spiegazione=[],
         )
+        prepara(r)
         om.sottometti(r)
     # Honeypot anti rubber-stamping: casi palesemente incoerenti inseriti nel flusso.
     candidati_honeypot = pred[(pred["y_true"] == 0) & (pred["y_pred"] == 0)].nsmallest(6, "proba")
@@ -155,15 +317,154 @@ def bootstrap():
             honeypot=True,
             honeypot_messaggio="Rischio molto basso, utenza standard e nessuna evidenza critica: approvare l'urgenza indica possibile rubber stamping.",
         )
+        prepara(r)
         om.sottometti(r)
     return om, audit, pred, spiegatore
 
 
 om, audit, pred, spiegatore = bootstrap()
 
-st.title("EnerGuard · Console operatore")
-st.caption("Vista unica per capire cosa lavorare, cosa è bloccato e quali decisioni richiedono controllo umano.")
-operatore = st.sidebar.text_input("ID operatore", value="OP-001")
+aree_stop = sorted(pred["area_geografica"].dropna().unique())
+tipi_stop = sorted(pred["tipo_asset"].dropna().unique())
+st.session_state.setdefault("stop_scope_global", "GLOBALE")
+st.session_state.setdefault("stop_scope_areas", [])
+st.session_state.setdefault("stop_scope_types", [])
+
+
+def seleziona_stop_globale():
+    if st.session_state.get("stop_scope_global") == "GLOBALE":
+        st.session_state["stop_scope_areas"] = []
+        st.session_state["stop_scope_types"] = []
+
+
+def seleziona_stop_specifico():
+    if (st.session_state.get("stop_scope_areas")
+            or st.session_state.get("stop_scope_types")):
+        st.session_state["stop_scope_global"] = None
+
+
+@st.dialog("Conferma stop operativo")
+def conferma_attivazione_stop(ambiti, motivazione, operatore_corrente):
+    st.error("Stai per bloccare l'esecuzione delle decisioni negli ambiti selezionati.")
+    st.markdown("**Ambiti interessati**")
+    st.write(", ".join(ambiti))
+    st.markdown("**Motivazione registrata nell'audit trail**")
+    st.info(motivazione)
+    st.caption("Lo stop si applica alle nuove raccomandazioni e a quelle già presenti in coda.")
+    conferma = st.checkbox("Confermo di aver verificato ambiti e motivazione")
+    col_conferma, col_annulla = st.columns(2)
+    if col_conferma.button("Conferma stop", type="primary", disabled=not conferma,
+                           use_container_width=True):
+        try:
+            decisioni_bloccate = om.attiva_stop_filtri(
+                ambiti, operatore_corrente, motivazione)
+            st.session_state["header_feedback"] = (
+                f"Stop attivato su {len(ambiti)} ambiti. "
+                f"Decisioni bloccate: {decisioni_bloccate}.")
+            st.session_state["stop_panel_open"] = False
+            st.rerun()
+        except ValueError as errore:
+            st.error(str(errore))
+    if col_annulla.button("Annulla", use_container_width=True):
+        st.rerun()
+
+
+header_title, header_operator, header_stop = st.columns([5, 1.6, 1.5], vertical_alignment="bottom")
+with header_title:
+    st.title("EnerGuard · Console operatore")
+    st.caption("Decisioni, controllo umano e stato operativo in un'unica vista.")
+with header_operator:
+    operatore = st.text_input(
+        "ID operatore", value="OP-001", key="header_operator", disabled=True)
+with header_stop:
+    if st.button("STOP OPERATIVO", type="primary", use_container_width=True, key="stop_cta"):
+        st.session_state["stop_panel_open"] = not st.session_state.get("stop_panel_open", False)
+
+header_feedback = st.session_state.pop("header_feedback", None)
+if header_feedback:
+    st.success(header_feedback)
+
+if om.stop_attivi:
+    st.error(f"STOP ATTIVO · {', '.join(sorted(om.stop_attivi))}")
+
+if st.session_state.get("stop_panel_open", False):
+    with st.container(border=True, key="stop_panel"):
+        st.subheader("Configura stop operativo")
+        st.caption("Definisci l'ambito e una motivazione verificabile. Potrai rileggere tutto prima della conferma finale.")
+        stop_scope, stop_reason = st.columns([1, 1.4])
+        with stop_scope:
+            st.markdown("**Ambiti da bloccare**")
+            st.caption("Globale esclude automaticamente ogni selezione specifica.")
+            globale_stop = st.pills(
+                "Globale",
+                ["GLOBALE"],
+                key="stop_scope_global",
+                on_change=seleziona_stop_globale,
+            )
+            aree_selezionate = st.pills(
+                "Area",
+                aree_stop,
+                selection_mode="multi",
+                key="stop_scope_areas",
+                on_change=seleziona_stop_specifico,
+            )
+            tipi_selezionati = st.pills(
+                "Tipo asset",
+                tipi_stop,
+                selection_mode="multi",
+                key="stop_scope_types",
+                on_change=seleziona_stop_specifico,
+            )
+            ambiti_stop = (
+                ["GLOBALE"] if globale_stop == "GLOBALE"
+                else [f"area:{area}" for area in (aree_selezionate or [])]
+                + [f"tipo:{tipo}" for tipo in (tipi_selezionati or [])]
+            )
+        with stop_reason:
+            mot_stop = st.text_area(
+                "Motivazione dello stop",
+                placeholder="Descrivi l'anomalia o il rischio operativo che richiede il blocco",
+                key="header_stop_reason",
+            )
+        azione_stop, chiudi_stop = st.columns([1, 1])
+        if azione_stop.button("Rivedi e conferma", type="primary", key="review_stop",
+                              use_container_width=True):
+            try:
+                om._valida_motivazione(mot_stop, consentire_duplicati=True)
+                om._normalizza_ambiti(ambiti_stop)
+                conferma_attivazione_stop(ambiti_stop, mot_stop.strip(), operatore)
+            except ValueError as errore:
+                st.error(str(errore))
+        if chiudi_stop.button("Chiudi", key="close_stop_panel", use_container_width=True):
+            st.session_state["stop_panel_open"] = False
+            st.rerun()
+
+        if om.stop_attivi:
+            st.divider()
+            st.markdown("**Riprendi attività**")
+            st.caption("Disattiva solo gli ambiti selezionati; gli altri stop resteranno operativi.")
+            resume_scope, resume_reason = st.columns([1, 1.4])
+            with resume_scope:
+                ambiti_ripresa = st.multiselect(
+                    "Ambiti da riattivare",
+                    sorted(om.stop_attivi),
+                    key="header_resume_scopes",
+                )
+            with resume_reason:
+                motivo_ripresa = st.text_input(
+                    "Motivazione della riattivazione",
+                    key="header_resume_reason",
+                )
+            if st.button("Riprendi ambiti selezionati", key="resume_selected"):
+                try:
+                    ripristinate = om.disattiva_stop_filtri(
+                        ambiti_ripresa, operatore, motivo_ripresa)
+                    st.session_state["header_feedback"] = (
+                        f"Stop disattivato su {len(ambiti_ripresa)} ambiti. "
+                        f"Attività ripristinate: {ripristinate}.")
+                    st.rerun()
+                except ValueError as errore:
+                    st.error(str(errore))
 
 st.markdown(
     """
@@ -171,56 +472,10 @@ st.markdown(
     """
 )
 
-# --- EMERGENCY STOP: sempre visibile, mai a piu' di un click ---
-st.sidebar.divider()
 _cfg = ConfigLLM()
-st.sidebar.caption(
+st.caption(
     f"Motore spiegazioni: **{'LLM · ' + _cfg.descrizione() if _cfg.attivo else 'template locale'}**"
     + ("" if _cfg.attivo else "  \nConfigurate .env (vedi .env.example) per usare un LLM esterno."))
-
-st.sidebar.subheader("Stop operativo")
-sidebar_feedback = st.session_state.pop("sidebar_feedback", None)
-if sidebar_feedback:
-    st.sidebar.success(sidebar_feedback)
-opzioni_stop = (
-    ["GLOBALE"]
-    + [f"area:{area}" for area in sorted(pred["area_geografica"].dropna().unique())]
-    + [f"tipo:{tipo}" for tipo in sorted(pred["tipo_asset"].dropna().unique())]
-)
-ambiti_stop = st.sidebar.multiselect(
-    "Blocca per area o tipo asset",
-    opzioni_stop,
-    default=["GLOBALE"],
-    help="Puoi selezionare piu' filtri: lo stop verra' applicato a tutte le decisioni che rientrano in almeno uno di questi ambiti."
-)
-mot_stop = st.sidebar.text_input("Motivo dello stop")
-c1, c2 = st.sidebar.columns(2)
-if c1.button("STOP", type="primary"):
-    try:
-        if hasattr(om, "attiva_stop_filtri"):
-            decisioni_bloccate = om.attiva_stop_filtri(ambiti_stop, operatore, mot_stop)
-        else:
-            decisioni_bloccate = 0
-            for ambito in ambiti_stop:
-                om.attiva_stop(ambito, operatore, mot_stop)
-        st.session_state["sidebar_feedback"] = f"Stop attivato su {len(ambiti_stop)} filtri. Decisioni bloccate: {decisioni_bloccate}."
-        st.rerun()
-    except ValueError as e:
-        st.sidebar.error(str(e))
-if c2.button("RIPRENDI"):
-    try:
-        if hasattr(om, "disattiva_stop_filtri"):
-            decisioni_ripristinate = om.disattiva_stop_filtri(ambiti_stop, operatore, mot_stop)
-        else:
-            decisioni_ripristinate = 0
-            for ambito in ambiti_stop:
-                om.disattiva_stop(ambito, operatore, mot_stop)
-        st.session_state["sidebar_feedback"] = f"Stop disattivato su {len(ambiti_stop)} filtri. Attivita ripristinate: {decisioni_ripristinate}."
-        st.rerun()
-    except ValueError as e:
-        st.sidebar.error(str(e))
-if om.stop_attivi:
-    st.sidebar.error(f"FILTRI DI STOP ATTIVI: {', '.join(sorted(om.stop_attivi))}")
 
 nuove_escalation = om.aggiorna_sla() if hasattr(om, "aggiorna_sla") else 0
 if nuove_escalation:
@@ -243,25 +498,18 @@ review_feedback = st.session_state.pop("review_feedback", None)
 if review_feedback:
     st.success(review_feedback)
 
-@st.cache_data(show_spinner=False)
-def _fattori_asset(asset_id: str):
-    """Estrae i fattori SHAP per un asset. In cache: SHAP e' costoso."""
-    import joblib
-    modello = joblib.load("modello.joblib")
-    df = carica_csv("energuard_dataset.csv")
-    X = pd.get_dummies(df.drop(columns=["asset_id", "guasto_entro_30gg"]))
-    asset_origine = asset_id.removeprefix("HP-")
-    x = X.loc[df["asset_id"] == asset_origine].iloc[0]
-    return estrai_fattori(modello, x, list(X.columns))
-
-
 def spiegazione_per(r):
     """Spiegazione in linguaggio operativo per una raccomandazione in coda."""
+    fattori_calcolati = _fattori_asset(r.asset_id)
+    if r.messaggio_llm:
+        return Spiegazione(r.messaggio_llm["testo"], r.messaggio_llm["incertezza"],
+                           fattori_calcolati, r.messaggio_llm["fonte"],
+                           r.messaggio_llm.get("latenza_ms", 0))
     rec = {"asset_id": r.asset_id, "tipo_asset": r.tipo_asset, "area_geografica": r.area_geografica,
            "criticita_utenza": r.criticita_utenza, "prob_guasto": r.prob_guasto,
            "confidenza": r.confidenza, "azione_proposta": r.azione_proposta,
            "livello": getattr(r.livello, "value", None), "soglia_confidenza": om.soglia_conf}
-    sp = spiegatore.spiega(rec, _fattori_asset(r.asset_id))
+    sp = spiegatore.spiega(rec, fattori_calcolati)
     r.messaggio_llm = {
         "testo": sp.testo,
         "incertezza": sp.incertezza,
@@ -520,6 +768,7 @@ def minuti_mediani_revisione(records):
 
 
 def tabella_kpi(records):
+    manager_kpi = om.kpi()
     chiuse = [r for r in om.coda if r.stato in (
         StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA, StatoDecisione.RIFIUTATA)]
     override = [r for r in chiuse if r.stato in (StatoDecisione.MODIFICATA, StatoDecisione.RIFIUTATA)]
@@ -570,10 +819,11 @@ def tabella_kpi(records):
     righe = [
         ["A1", "Auto-esecuzione impropria", f"{len(auto_improprie)} / {len(hic_hitl)}", "0 assoluto", "OK" if not auto_improprie else "Allarme"],
         ["A2", "Override umano", percentuale(len(override), len(chiuse)), "5% - 40%", "Da monitorare" if chiuse else "n/d"],
-        ["A3", "Tempo mediano revisione", minuti_mediani_revisione(records), "30 sec - 5 min", "Da monitorare"],
-        ["A4", "Indice rubber-stamping", percentuale(rubber, len(motivazioni)), "< 10%", "OK" if not motivazioni or rubber / max(len(motivazioni), 1) < 0.10 else "Allarme"],
+        ["A3", "Tempo revisione", f"media {manager_kpi['tempo_medio_revisione_min'] or 'n/d'} min; mediana {manager_kpi['tempo_mediano_revisione_min'] or 'n/d'} min", "30 sec - 5 min", "Da monitorare"],
+        ["A4", "Indice rubber-stamping", f"brevi {manager_kpi['motivazioni_brevi_pct'] or 0}% + duplicati {percentuale(duplicati, len(motivazioni))}", "< 10%", "OK" if not motivazioni or rubber / max(len(motivazioni), 1) < 0.10 else "Allarme"],
         ["A5", "Escalation SLA scaduto", percentuale(len(in_escalation), len(hitl)), "< 15%", "OK" if not hitl or len(in_escalation) / len(hitl) < 0.15 else "Allarme"],
         ["A6", "Copertura routing dichiarato", percentuale(len(routing_ok), len(om.coda)), "100%", "OK" if len(routing_ok) == len(om.coda) else "Allarme"],
+        ["A6b", "Distribuzione livelli", "; ".join(f"{livello} {numero}" for livello, numero in manager_kpi["distribuzione_livelli"].items()), "Esposta", "OK"],
         ["B1", "Copertura spiegazioni", "100% sulle card visibili", "100%", "OK"],
         ["B2", "Visibilità incertezza", "100% sulle card visibili", "100%", "OK"],
         ["B3", "Test dei 60 secondi", "Da verificare in demo", "Superato", "Manuale"],
@@ -847,6 +1097,13 @@ with tab_kpi:
 # ----------------------------------------------------------------------
 with tab_audit:
     st.subheader("Registro audit")
+    catena_integra, record_audit = audit.verifica_catena()
+    if catena_integra:
+        st.success(f"Integrità audit verificata: catena hash integra su {record_audit} record.")
+    else:
+        st.error(f"Catena audit compromessa: verifica fallita dopo {record_audit} record validi.")
+    st.caption("Ogni record contiene l'hash del record precedente e il proprio hash. "
+               "La verifica ricalcola la catena e rileva modifiche o cancellazioni silenziose.")
     log_path = "audit_trail.jsonl"
     if not os.path.exists(log_path):
         st.info("Nessun evento di audit registrato ancora.")
@@ -880,7 +1137,6 @@ with tab_audit:
                     selection_mode="multi",
                     format_func=stato_filtro_leggibile,
                     key="audit_filtro_stati",
-                    wrap=True,
                 )
             with f_supervisione:
                 filtro_supervisioni = st.pills(
@@ -888,7 +1144,6 @@ with tab_audit:
                     supervisioni_disponibili,
                     selection_mode="multi",
                     key="audit_filtro_supervisioni",
-                    wrap=True,
                 )
 
             f_attore, f_testo = st.columns([1.2, 1])
@@ -898,7 +1153,6 @@ with tab_audit:
                     attori_disponibili,
                     selection_mode="multi",
                     key="audit_filtro_attori",
-                    wrap=True,
                 )
             with f_testo:
                 filtro_testo_audit = st.text_input(

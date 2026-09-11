@@ -41,6 +41,7 @@ class AuditLogger:
                 "prob_guasto": raccomandazione.prob_guasto,
                 "confidenza": raccomandazione.confidenza,
                 "motivazione": raccomandazione.motivazione,
+                "spiegazione": raccomandazione.spiegazione,
             }
             if getattr(raccomandazione, "messaggio_llm", None):
                 record["decisione"]["messaggio_llm"] = raccomandazione.messaggio_llm

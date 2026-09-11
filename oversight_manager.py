@@ -18,6 +18,9 @@ TODO per il team:
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+import json
+from pathlib import Path
+from statistics import mean, median
 from typing import Iterable, Optional
 import uuid
 
@@ -58,6 +61,7 @@ class Raccomandazione:
     stato: StatoDecisione = StatoDecisione.IN_ATTESA
     revisore: Optional[str] = None
     motivazione: Optional[str] = None
+    revisionata_il: Optional[str] = None
     evidenze_keywords: list[str] = field(default_factory=list)
     honeypot: bool = False
     honeypot_messaggio: Optional[str] = None
@@ -66,14 +70,33 @@ class Raccomandazione:
 
 class OversightManager:
     def __init__(self, audit_logger, soglia_confidenza_alta: float = 0.80,
-                 soglia_rischio_alto: float = 0.60, sla_minuti: int = 30):
+                 soglia_rischio_alto: float = 0.60, sla_minuti: int = 30,
+                 stop_state_path: Optional[str] = None):
         self.audit = audit_logger
         self.soglia_conf = soglia_confidenza_alta
         self.soglia_rischio = soglia_rischio_alto
         self.sla_minuti = sla_minuti
         self.coda: list[Raccomandazione] = []
-        self.stop_attivi: set[str] = set()  # es. {"area:Sud", "tipo:linea_AT", "GLOBALE"}
+        self.stop_state_path = Path(stop_state_path) if stop_state_path else None
+        self.stop_attivi: set[str] = self._carica_stop()
         self._storico_motivazioni: list[tuple[datetime, str]] = []
+
+    def _carica_stop(self) -> set[str]:
+        if self.stop_state_path is None or not self.stop_state_path.exists():
+            return set()
+        try:
+            dati = json.loads(self.stop_state_path.read_text(encoding="utf-8"))
+            return {str(ambito) for ambito in dati.get("stop_attivi", []) if str(ambito).strip()}
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return set()
+
+    def _salva_stop(self):
+        if self.stop_state_path is None:
+            return
+        self.stop_state_path.write_text(
+            json.dumps({"stop_attivi": sorted(self.stop_attivi)}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _normalizza_motivazione(motivazione: str) -> str:
@@ -167,6 +190,7 @@ class OversightManager:
             raise ValueError("ALLERTA RUBBER STAMPING: questa raccomandazione era "
                              "un controllo honeypot palesemente incoerente.")
         r.stato, r.revisore, r.motivazione = esito, revisore, testo
+        r.revisionata_il = datetime.now().isoformat()
         r.evidenze_keywords = keywords
         self._storico_motivazioni.append((datetime.now(), testo))
         if azione_modificata:
@@ -214,6 +238,7 @@ class OversightManager:
             self.stop_attivi.add(ambito)
             self.audit.log(operatore, f"emergency_stop_ON:{ambito}",
                            None, extra={"motivazione": testo})
+        self._salva_stop()
         decisioni_bloccate = self._blocca_decisioni_in_stop()
         if len(ambiti_norm) > 1:
             self.audit.log(operatore, "emergency_stop_ON_multiplo", None,
@@ -233,6 +258,7 @@ class OversightManager:
             self.stop_attivi.discard(ambito)
             self.audit.log(operatore, f"emergency_stop_OFF:{ambito}",
                            None, extra={"motivazione": testo})
+        self._salva_stop()
         decisioni_ripristinate = self._ripristina_decisioni_fuori_stop()
         if len(ambiti_norm) > 1:
             self.audit.log(operatore, "emergency_stop_OFF_multiplo", None,
@@ -301,15 +327,32 @@ class OversightManager:
     # KPI per il pannello di monitoraggio (vedi Indicatori di Qualita')
     # ------------------------------------------------------------------
     def kpi(self) -> dict:
-        chiuse = [r for r in self.coda if r.stato != StatoDecisione.IN_ATTESA]
+        chiuse = [r for r in self.coda if r.stato in (
+            StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA,
+            StatoDecisione.RIFIUTATA)]
         override = [r for r in chiuse if r.stato in
                     (StatoDecisione.RIFIUTATA, StatoDecisione.MODIFICATA)]
+        durate = []
+        for r in chiuse:
+            if not r.revisionata_il:
+                continue
+            durata = (datetime.fromisoformat(r.revisionata_il)
+                       - datetime.fromisoformat(r.creata_il)).total_seconds() / 60
+            durate.append(durata)
+        distribuzione = {
+            livello.value: sum(1 for r in self.coda if r.livello == livello)
+            for livello in LivelloSupervisione
+        }
+        motivazioni = [r.motivazione.strip() for r in chiuse if r.motivazione]
+        motivazioni_brevi = sum(1 for testo in motivazioni if len(testo) < 30)
         return {
             "in_attesa": sum(1 for r in self.coda if r.stato == StatoDecisione.IN_ATTESA),
             "tasso_override": round(len(override) / len(chiuse), 3) if chiuse else None,
             "stop_attivi": sorted(self.stop_attivi),
-            # TODO: tempo medio di revisione, distribuzione HIC/HITL/HOTL,
-            #       % motivazioni sotto i 30 caratteri (proxy di rubber-stamping)
+            "tempo_medio_revisione_min": round(mean(durate), 2) if durate else None,
+            "tempo_mediano_revisione_min": round(median(durate), 2) if durate else None,
+            "distribuzione_livelli": distribuzione,
+            "motivazioni_brevi_pct": round(100 * motivazioni_brevi / len(motivazioni), 2) if motivazioni else None,
         }
 
 
