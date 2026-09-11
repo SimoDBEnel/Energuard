@@ -292,16 +292,6 @@ st.markdown(
         opacity: 1 !important;
     }
 
-    [data-testid="stCheckbox"] label > span:first-child {
-        background: #ffffff !important;
-        border: 2px solid #66736d !important;
-    }
-
-    [data-testid="stCheckbox"] label:has(input:checked) > span:first-child {
-        background: #245c48 !important;
-        border-color: #163b2e !important;
-    }
-
     [data-testid="stExpander"] details > summary {
         background: #eef3f0 !important;
         color: #17211d !important;
