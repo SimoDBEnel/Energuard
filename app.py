@@ -84,6 +84,10 @@ def etichetta_ambito(ambito):
         return f"Tipo asset · {etichetta_tecnica(tipo, TIPO_ASSET_LABELS)}"
     return etichetta_tecnica(ambito)
 
+
+def etichetta_gruppo_stop(gruppo):
+    return " + ".join(etichetta_ambito(ambito) for ambito in sorted(gruppo))
+
 st.markdown(
     """
     <style>
@@ -472,6 +476,28 @@ def bootstrap():
     om = OversightManager(audit, stop_state_path="oversight_stops.json")
     spiegatore = crea_spiegatore(audit)   # LLM se .env e' configurato, altrimenti template
     pred = carica_csv("predizioni.csv")
+    detector = BiasDetector()
+    gap_recall = max(
+        detector.metriche_per_gruppo(pred, colonna)["recall"].max()
+        - detector.metriche_per_gruppo(pred, colonna)["recall"].min()
+        for colonna in ("area_geografica", "tipo_asset")
+    )
+    drift = detector.drift_temporale(pred, "area_geografica")
+    drift_massimo = float(drift["drift"].abs().max()) if not drift.empty else 0.0
+    motivi_mitigazione = []
+    if gap_recall > detector.soglia_gap_recall:
+        motivi_mitigazione.append(
+            f"gap recall {gap_recall:.3f} > {detector.soglia_gap_recall:.2f}")
+    if drift_massimo > 0.15:
+        motivi_mitigazione.append(f"drift massimo {drift_massimo:.3f} > 0.15")
+    om.diagnostica_qualita = {
+        "gap_recall_massimo": gap_recall,
+        "drift_massimo": drift_massimo,
+        "soglia_drift": 0.15,
+        "drift": drift,
+    }
+    if motivi_mitigazione:
+        om.configura_mitigazione_prudenziale(True, motivi_mitigazione)
 
     def prepara(r):
         fattori = _fattori_asset(r.asset_id)
@@ -587,7 +613,12 @@ if header_feedback:
     st.success(header_feedback)
 
 if om.stop_attivi:
-    st.error(f"STOP ATTIVO · {', '.join(etichetta_ambito(a) for a in sorted(om.stop_attivi))}")
+    gruppi_attivi = " | ".join(etichetta_gruppo_stop(gruppo) for gruppo in om.stop_gruppi)
+    st.error(f"STOP ATTIVO · {gruppi_attivi}")
+
+if om.mitigazione_prudenziale:
+    st.warning("Mitigazione prudenziale attiva: i casi HOTL sono promossi a HITL. "
+               + "; ".join(om.motivi_mitigazione))
 
 if st.session_state.get("stop_panel_open", False):
     with st.container(border=True, key="stop_panel"):
@@ -620,6 +651,8 @@ if st.session_state.get("stop_panel_open", False):
                 on_change=seleziona_stop_specifico,
                 format_func=lambda tipo: etichetta_tecnica(tipo, TIPO_ASSET_LABELS),
             )
+            if aree_selezionate and tipi_selezionati:
+                st.caption("Le aree selezionate sono in OR tra loro e vengono intersecate con i tipi selezionati.")
             ambiti_stop = (
                 ["GLOBALE"] if globale_stop == "GLOBALE"
                 else [f"area:{area}" for area in (aree_selezionate or [])]
@@ -647,14 +680,14 @@ if st.session_state.get("stop_panel_open", False):
         if om.stop_attivi:
             st.divider()
             st.markdown("**Riprendi attività**")
-            st.caption("Disattiva solo gli ambiti selezionati; gli altri stop resteranno operativi.")
+            st.caption("Disattiva gruppi completi; gli altri stop resteranno operativi.")
             resume_scope, resume_reason = st.columns([1, 1.4])
             with resume_scope:
-                ambiti_ripresa = st.multiselect(
-                    "Ambiti da riattivare",
-                    sorted(om.stop_attivi),
+                gruppi_ripresa = st.multiselect(
+                    "Gruppi da riattivare",
+                    list(range(len(om.stop_gruppi))),
                     key="header_resume_scopes",
-                    format_func=etichetta_ambito,
+                    format_func=lambda indice: etichetta_gruppo_stop(om.stop_gruppi[indice]),
                 )
             with resume_reason:
                 motivo_ripresa = st.text_input(
@@ -663,10 +696,14 @@ if st.session_state.get("stop_panel_open", False):
                 )
             if st.button("Riprendi ambiti selezionati", key="resume_selected"):
                 try:
-                    ripristinate = om.disattiva_stop_filtri(
-                        ambiti_ripresa, operatore, motivo_ripresa)
+                    om._valida_motivazione(motivo_ripresa, consentire_duplicati=True)
+                    gruppi = [om.stop_gruppi[indice] for indice in sorted(gruppi_ripresa, reverse=True)]
+                    if not gruppi:
+                        raise ValueError("Selezionare almeno un gruppo da riattivare.")
+                    ripristinate = sum(om.disattiva_stop_filtri(
+                        gruppo, operatore, motivo_ripresa) for gruppo in gruppi)
                     st.session_state["header_feedback"] = (
-                        f"Stop disattivato su {len(ambiti_ripresa)} ambiti. "
+                        f"Stop disattivato su {len(gruppi)} gruppi. "
                         f"Attività ripristinate: {ripristinate}.")
                     st.rerun()
                 except ValueError as errore:
@@ -972,7 +1009,7 @@ def livello_atteso(r):
     if r.prob_guasto >= om.soglia_rischio or r.confidenza < om.soglia_conf:
         return "HITL"
     if r.azione_proposta in ("nessuna_azione", "ispezione_routine"):
-        return "HOTL"
+        return "HITL" if om.mitigazione_prudenziale else "HOTL"
     return "HITL"
 
 
@@ -1015,6 +1052,22 @@ def tabella_kpi(records):
     auto_improprie = [r for r in hic_hitl if r.stato == StatoDecisione.AUTO_ESEGUITA]
     routing_ok = [r for r in om.coda if getattr(r.livello, "value", None) == livello_atteso(r)]
 
+    decisioni_audit = {}
+    eventi_per_decisione = {}
+    for record in records:
+        decisione = record.get("decisione", {})
+        decision_id = decisione.get("id")
+        if decision_id:
+            decisioni_audit[decision_id] = decisione
+            eventi_per_decisione.setdefault(decision_id, set()).add(record.get("evento", ""))
+    con_spiegazione = sum(
+        len(decisione.get("spiegazione") or []) >= 3 for decisione in decisioni_audit.values())
+    con_incertezza = sum(
+        decisione.get("confidenza") is not None
+        and bool((decisione.get("messaggio_llm") or {}).get("incertezza"))
+        for decisione in decisioni_audit.values()
+    )
+
     revisioni_log = [r for r in records if str(r.get("evento", "")).startswith("revisione_")]
     motivazioni = [r.get("decisione", {}).get("motivazione") for r in revisioni_log]
     motivazioni = [m.strip() for m in motivazioni if isinstance(m, str) and m.strip()]
@@ -1044,10 +1097,29 @@ def tabella_kpi(records):
     else:
         override_area = "n/d"
 
-    spiegazioni_con_fonte = [
-        r for r in records
-        if r.get("decisione", {}).get("messaggio_llm", {}).get("fonte")
-    ]
+    spiegazioni_log = [r for r in records if r.get("evento") == "spiegazione_generata"]
+    spiegazioni_con_fonte = [r for r in spiegazioni_log if (
+        r.get("extra", {}).get("fonte")
+        or r.get("decisione", {}).get("messaggio_llm", {}).get("fonte"))]
+
+    transizioni_attese = 0
+    transizioni_presenti = 0
+    for raccomandazione in om.coda:
+        eventi = eventi_per_decisione.get(raccomandazione.id, set())
+        if raccomandazione.livello:
+            iniziale = f"in_coda_{raccomandazione.livello.value}"
+            transizioni_attese += 1
+            transizioni_presenti += iniziale in eventi
+        if raccomandazione.stato == StatoDecisione.ESCALATION:
+            transizioni_attese += 1
+            transizioni_presenti += "escalation_sla_scaduto" in eventi
+        elif raccomandazione.stato in (StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA,
+                                       StatoDecisione.RIFIUTATA):
+            transizioni_attese += 1
+            transizioni_presenti += f"revisione_{raccomandazione.stato.value}" in eventi
+        elif raccomandazione.stato == StatoDecisione.BLOCCATA_STOP:
+            transizioni_attese += 1
+            transizioni_presenti += bool({"blocco_emergency_stop", "blocco_emergency_stop_attivato"} & eventi)
     chiamate = getattr(spiegatore, "chiamate", None)
     if chiamate and (chiamate.get("ok", 0) + chiamate.get("fallback", 0)):
         fallback_rate = percentuale(chiamate.get("fallback", 0), chiamate.get("ok", 0) + chiamate.get("fallback", 0))
@@ -1060,19 +1132,19 @@ def tabella_kpi(records):
         ["A3", "Tempo revisione", f"media {manager_kpi['tempo_medio_revisione_min'] or 'n/d'} min; mediana {manager_kpi['tempo_mediano_revisione_min'] or 'n/d'} min", "30 sec - 5 min", "Da monitorare"],
         ["A4", "Indice rubber-stamping", f"brevi {manager_kpi['motivazioni_brevi_pct'] or 0}% + duplicati {percentuale(duplicati, len(motivazioni))}", "< 10%", "OK" if not motivazioni or rubber / max(len(motivazioni), 1) < 0.10 else "Allarme"],
         ["A5", "Escalation SLA scaduto", percentuale(len(in_escalation), len(hitl)), "< 15%", "OK" if not hitl or len(in_escalation) / len(hitl) < 0.15 else "Allarme"],
-        ["A6", "Copertura routing dichiarato", percentuale(len(routing_ok), len(om.coda)), "100%", "OK" if len(routing_ok) == len(om.coda) else "Allarme"],
+        ["A6", "Conformità alla matrice routing indipendente", percentuale(len(routing_ok), len(om.coda)), "100%", "OK" if len(routing_ok) == len(om.coda) else "Allarme"],
         ["A6b", "Distribuzione livelli", "; ".join(f"{livello} {numero}" for livello, numero in manager_kpi["distribuzione_livelli"].items()), "Esposta", "OK"],
-        ["B1", "Copertura spiegazioni", "100% sulle card visibili", "100%", "OK"],
-        ["B2", "Visibilità incertezza", "100% sulle card visibili", "100%", "OK"],
+        ["B1", "Decisioni con almeno 3 fattori", percentuale(con_spiegazione, len(decisioni_audit)), "100%", "OK" if con_spiegazione == len(decisioni_audit) else "Allarme"],
+        ["B2", "Decisioni con confidenza e incertezza", percentuale(con_incertezza, len(decisioni_audit)), "100%", "OK" if con_incertezza == len(decisioni_audit) else "Allarme"],
         ["B3", "Test dei 60 secondi", "Da verificare in demo", "Superato", "Manuale"],
-        ["B3b", "Tracciabilità spiegazione", percentuale(len(spiegazioni_con_fonte), len(revisioni_log)), "100%", "Da monitorare"],
+        ["B3b", "Spiegazioni con fonte", percentuale(len(spiegazioni_con_fonte), len(spiegazioni_log)), "100%", "OK" if len(spiegazioni_con_fonte) == len(spiegazioni_log) else "Allarme"],
         ["B3c", "Fallback spiegazione", fallback_rate, "< 5%", "Da monitorare"],
         ["B4", "Distanza gesto critico", "Stop: 1 click; override: 2 click", "<= 1 / <= 2", "OK"],
         ["C1", "Gap recall sottogruppi", f"area {gap_recall_area}; tipo {gap_recall_tipo}", "alert > 0.15", "Allarme" if max(gap_recall_area, gap_recall_tipo) > 0.15 else "OK"],
         ["C2", "Gap calibrazione gruppo", str(gap_calibrazione), "alert > 0.10", "Allarme" if gap_calibrazione > 0.10 else "OK"],
         ["C3", "Override per sottogruppo", override_area, "Esposto", "Da monitorare"],
-        ["C4", "Drift performance", "Non esposto nella vista attuale", "Grafico + alert", "Da completare"],
-        ["D1", "Completezza audit trail", "Transizioni principali loggate", "100%", "Da campionare"],
+        ["C4", "Drift performance", f"max {om.diagnostica_qualita['drift_massimo']:.3f}", "alert > 0.15", "Allarme" if om.diagnostica_qualita["drift_massimo"] > 0.15 else "OK"],
+        ["D1", "Copertura transizioni attese", percentuale(transizioni_presenti, transizioni_attese), "100%", "OK" if transizioni_presenti == transizioni_attese else "Allarme"],
         ["D3", "Ricostruibilità decisione", "Tabella + popup dettaglio + download JSON", "< 60 sec", "OK"],
     ]
     return pd.DataFrame(righe, columns=["Codice", "KPI", "Valore attuale", "Target", "Stato"])
@@ -1356,6 +1428,33 @@ with tab_matrice:
 with tab_kpi:
     st.subheader("KPI qualità dashboard")
     st.caption("Indicatori tratti dal documento 'EnerGuard · Indicatori di qualità della dashboard di supervisione'.")
+    st.markdown("#### Drift e mitigazione")
+    drift_df = om.diagnostica_qualita["drift"].copy()
+    if drift_df.empty:
+        st.info("Dati insufficienti per stimare il drift temporale.")
+    else:
+        drift_df["drift_assoluto"] = drift_df["drift"].abs()
+        grafico_drift = alt.Chart(drift_df).mark_line(point=True).encode(
+            x=alt.X("window_start:Q", title="Finestra pseudo-temporale"),
+            y=alt.Y("drift_assoluto:Q", title="Scostamento assoluto", scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color("area_geografica:N", title="Area"),
+            tooltip=["area_geografica", "window_start", "window_end", "predizione_media", "osservato_media", "drift_assoluto"],
+        )
+        soglia_drift = alt.Chart(pd.DataFrame({"soglia": [om.diagnostica_qualita["soglia_drift"]]})).mark_rule(
+            color="#b42318", strokeDash=[6, 4]).encode(y="soglia:Q")
+        st.altair_chart((grafico_drift + soglia_drift).properties(height=260), use_container_width=True)
+    st.session_state.setdefault("mitigazione_prudenziale_ui", om.mitigazione_prudenziale)
+    mitigazione_ui = st.toggle(
+        "Promuovi prudenzialmente HOTL a HITL",
+        key="mitigazione_prudenziale_ui",
+        help="La modifica è registrata nell'audit trail e non riduce mai il livello di supervisione.",
+    )
+    if mitigazione_ui != om.mitigazione_prudenziale:
+        motivi = om.motivi_mitigazione or ["Disattivazione manuale della mitigazione automatica"]
+        om.configura_mitigazione_prudenziale(mitigazione_ui, motivi, operatore)
+        st.rerun()
+    st.caption("Soglia drift: 0,15. Il pseudo-tempo usa finestre ordinate per asset perché il dataset non contiene timestamp operativi.")
+
     records_kpi = carica_records_audit()
     kpi_df = tabella_kpi(records_kpi)
 

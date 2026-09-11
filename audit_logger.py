@@ -15,6 +15,9 @@ TODO per il team:
 
 import hashlib
 import json
+import os
+import fcntl
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -22,39 +25,47 @@ from pathlib import Path
 class AuditLogger:
     def __init__(self, percorso: str = "audit_trail.jsonl"):
         self.path = Path(percorso)
-        self._ultimo_hash = self._recupera_ultimo_hash()
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock():
+            integra, validi = self._verifica_catena_senza_lock()
+            if self.path.exists() and not integra:
+                self._archivia_catena_compromessa(validi)
 
     def log(self, attore: str, evento: str, raccomandazione=None, extra: dict = None):
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "attore": attore,                  # "SISTEMA" oppure id operatore
-            "evento": evento,
-            "hash_precedente": self._ultimo_hash,
-        }
-        if raccomandazione is not None:
-            record["decisione"] = {
-                "id": raccomandazione.id,
-                "asset_id": raccomandazione.asset_id,
-                "livello": getattr(raccomandazione.livello, "value", None),
-                "stato": raccomandazione.stato.value,
-                "azione": raccomandazione.azione_proposta,
-                "prob_guasto": raccomandazione.prob_guasto,
-                "confidenza": raccomandazione.confidenza,
-                "motivazione": raccomandazione.motivazione,
-                "spiegazione": raccomandazione.spiegazione,
+        with self._lock():
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "attore": attore,
+                "evento": evento,
+                "hash_precedente": self._recupera_ultimo_hash(),
             }
-            if getattr(raccomandazione, "messaggio_llm", None):
-                record["decisione"]["messaggio_llm"] = raccomandazione.messaggio_llm
-        if extra:
-            record["extra"] = extra
-        record["hash"] = self._hash(record)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._ultimo_hash = record["hash"]
+            if raccomandazione is not None:
+                record["decisione"] = {
+                    "id": raccomandazione.id,
+                    "asset_id": raccomandazione.asset_id,
+                    "livello": getattr(raccomandazione.livello, "value", None),
+                    "stato": raccomandazione.stato.value,
+                    "azione": raccomandazione.azione_proposta,
+                    "prob_guasto": raccomandazione.prob_guasto,
+                    "confidenza": raccomandazione.confidenza,
+                    "motivazione": raccomandazione.motivazione,
+                    "spiegazione": raccomandazione.spiegazione,
+                }
+                if getattr(raccomandazione, "messaggio_llm", None):
+                    record["decisione"]["messaggio_llm"] = raccomandazione.messaggio_llm
+            if extra:
+                record["extra"] = extra
+            record["hash"] = self._hash(record)
+            self._append(record)
         return record
 
     def verifica_catena(self) -> tuple[bool, int]:
         """Ritorna (integra?, n_record). Da mostrare nella dashboard."""
+        with self._lock():
+            return self._verifica_catena_senza_lock()
+
+    def _verifica_catena_senza_lock(self) -> tuple[bool, int]:
         precedente = "GENESI"
         n = 0
         for riga in self._leggi():
@@ -73,6 +84,41 @@ class AuditLogger:
     def _recupera_ultimo_hash(self) -> str:
         record = self._leggi()
         return record[-1]["hash"] if record else "GENESI"
+
+    @contextmanager
+    def _lock(self):
+        with self.lock_path.open("a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _append(self, record: dict):
+        with self.path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+    def _archivia_catena_compromessa(self, record_validi: int):
+        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        archivio = self.path.with_name(f"{self.path.stem}.corrotto-{timestamp}{self.path.suffix}")
+        totale = len(self._leggi())
+        self.path.replace(archivio)
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "attore": "SISTEMA",
+            "evento": "migrazione_catena_audit_compromessa",
+            "hash_precedente": "GENESI",
+            "extra": {
+                "archivio": archivio.name,
+                "record_validi": record_validi,
+                "record_totali": totale,
+                "sha256_archivio": hashlib.sha256(archivio.read_bytes()).hexdigest(),
+            },
+        }
+        record["hash"] = self._hash(record)
+        self._append(record)
 
     @staticmethod
     def _hash(record: dict) -> str:

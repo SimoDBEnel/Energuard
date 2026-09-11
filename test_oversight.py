@@ -1,7 +1,9 @@
 import unittest
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from oversight_manager import LivelloSupervisione, OversightManager, Raccomandazione, StatoDecisione
 from audit_logger import AuditLogger
@@ -58,7 +60,7 @@ class TestOversightValidation(unittest.TestCase):
                          "Motivazione valida ma errata", evidenze_keywords=["rischio", "confidenza"])
         self.assertEqual(r.stato, StatoDecisione.IN_ATTESA)
 
-    def test_emergency_stop_multi_filtro_blocca_tutta_la_coda_applicabile(self):
+    def test_emergency_stop_multi_filtro_usa_and_tra_dimensioni(self):
         om = OversightManager(AuditLogger("test_audit_temp.jsonl"))
         nord = self._raccomandazione("A-5")
         sud_linea = self._raccomandazione("A-6")
@@ -70,15 +72,15 @@ class TestOversightValidation(unittest.TestCase):
         om.coda.extend([nord, sud_linea, centro_cabina])
 
         bloccate = om.attiva_stop_filtri(
-            ["area:Nord", "tipo:linea_AT"], "OP-01",
+            ["area:Sud", "tipo:linea_AT"], "OP-01",
             "Stop operativo su filtri multipli"
         )
 
-        self.assertEqual(bloccate, 2)
-        self.assertEqual(nord.stato, StatoDecisione.BLOCCATA_STOP)
+        self.assertEqual(bloccate, 1)
+        self.assertEqual(nord.stato, StatoDecisione.IN_ATTESA)
         self.assertEqual(sud_linea.stato, StatoDecisione.BLOCCATA_STOP)
         self.assertEqual(centro_cabina.stato, StatoDecisione.IN_ATTESA)
-        self.assertEqual(om.stop_attivi, {"area:Nord", "tipo:linea_AT"})
+        self.assertEqual(om.stop_attivi, {"area:Sud", "tipo:linea_AT"})
 
     def test_riprendi_attivita_ripristina_decisioni_non_piu_in_stop(self):
         om = OversightManager(AuditLogger("test_audit_temp.jsonl"))
@@ -88,8 +90,8 @@ class TestOversightValidation(unittest.TestCase):
         sud_linea.tipo_asset = "linea_AT"
         om.coda.extend([nord, sud_linea])
 
-        om.attiva_stop_filtri(["area:Nord", "tipo:linea_AT"], "OP-01",
-                              "Stop operativo su filtri multipli")
+        om.attiva_stop_filtri(["area:Nord"], "OP-01", "Stop operativo sulla sola area Nord")
+        om.attiva_stop_filtri(["tipo:linea_AT"], "OP-01", "Stop operativo sulle sole linee alta tensione")
         ripristinate = om.disattiva_stop_filtri(["area:Nord"], "OP-01",
                                                 "Ripresa attivita area Nord")
 
@@ -129,6 +131,38 @@ class TestOversightValidation(unittest.TestCase):
         self.assertEqual(record["decisione"]["messaggio_llm"]["testo"], "Spiegazione operativa")
         self.assertNotIn("llm", record["evento"].lower())
         path.unlink()
+
+    def test_audit_con_due_istanze_mantiene_catena_integra(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.jsonl"
+            audit_a = AuditLogger(str(path))
+            audit_b = AuditLogger(str(path))
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit((audit_a if indice % 2 else audit_b).log,
+                                    "SISTEMA", f"evento_{indice}")
+                    for indice in range(40)
+                ]
+                for future in futures:
+                    future.result()
+
+            self.assertEqual(AuditLogger(str(path)).verifica_catena(), (True, 40))
+
+    def test_audit_archivia_catena_compromessa_senza_riscriverla(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.jsonl"
+            audit = AuditLogger(str(path))
+            audit.log("SISTEMA", "primo")
+            with path.open("a", encoding="utf-8") as file:
+                file.write('{"evento":"record_non_valido","hash":"errato"}\n')
+
+            nuovo_audit = AuditLogger(str(path))
+
+            self.assertEqual(nuovo_audit.verifica_catena(), (True, 1))
+            migrazione = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(migrazione["evento"], "migrazione_catena_audit_compromessa")
+            self.assertEqual(len(list(Path(directory).glob("audit.corrotto-*.jsonl"))), 1)
 
     def test_sla_scaduto_porta_hitl_in_escalation(self):
         om = OversightManager(AuditLogger("test_audit_temp.jsonl"), sla_minuti=30)

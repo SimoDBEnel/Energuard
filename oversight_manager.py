@@ -78,23 +78,34 @@ class OversightManager:
         self.sla_minuti = sla_minuti
         self.coda: list[Raccomandazione] = []
         self.stop_state_path = Path(stop_state_path) if stop_state_path else None
-        self.stop_attivi: set[str] = self._carica_stop()
+        self.stop_gruppi: list[frozenset[str]] = self._carica_stop()
+        self.mitigazione_prudenziale = False
+        self.motivi_mitigazione: list[str] = []
         self._storico_motivazioni: list[tuple[datetime, str]] = []
 
-    def _carica_stop(self) -> set[str]:
+    @property
+    def stop_attivi(self) -> set[str]:
+        return {ambito for gruppo in self.stop_gruppi for ambito in gruppo}
+
+    def _carica_stop(self) -> list[frozenset[str]]:
         if self.stop_state_path is None or not self.stop_state_path.exists():
-            return set()
+            return []
         try:
             dati = json.loads(self.stop_state_path.read_text(encoding="utf-8"))
-            return {str(ambito) for ambito in dati.get("stop_attivi", []) if str(ambito).strip()}
+            gruppi = dati.get("stop_gruppi")
+            if gruppi is None:
+                gruppi = [[ambito] for ambito in dati.get("stop_attivi", [])]
+            return [frozenset(str(ambito) for ambito in gruppo if str(ambito).strip())
+                    for gruppo in gruppi if gruppo]
         except (OSError, json.JSONDecodeError, AttributeError):
-            return set()
+            return []
 
     def _salva_stop(self):
         if self.stop_state_path is None:
             return
         self.stop_state_path.write_text(
-            json.dumps({"stop_attivi": sorted(self.stop_attivi)}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps({"stop_gruppi": [sorted(gruppo) for gruppo in self.stop_gruppi]},
+                       ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -151,8 +162,23 @@ class OversightManager:
             livello = LivelloSupervisione.HOTL
         else:
             livello = LivelloSupervisione.HITL   # default prudente
+        if livello == LivelloSupervisione.HOTL and self.mitigazione_prudenziale:
+            livello = LivelloSupervisione.HITL
         r.livello = livello
         return livello
+
+    def configura_mitigazione_prudenziale(self, attiva: bool, motivi: Iterable[str],
+                                          attore: str = "SISTEMA"):
+        motivi_norm = [str(motivo).strip() for motivo in motivi if str(motivo).strip()]
+        if self.mitigazione_prudenziale == attiva and self.motivi_mitigazione == motivi_norm:
+            return False
+        self.mitigazione_prudenziale = attiva
+        self.motivi_mitigazione = motivi_norm if attiva else []
+        self.audit.log(attore, "mitigazione_prudenziale_ON" if attiva
+                       else "mitigazione_prudenziale_OFF", None,
+                       extra={"motivi": motivi_norm,
+                              "effetto": "promozione HOTL a HITL"})
+        return True
 
     # ------------------------------------------------------------------
     def sottometti(self, r: Raccomandazione):
@@ -234,17 +260,20 @@ class OversightManager:
         """Attiva uno stop su uno o piu' ambiti e blocca la coda gia' esposta."""
         testo = self._valida_motivazione(motivazione, consentire_duplicati=True)
         ambiti_norm = self._normalizza_ambiti(ambiti)
-        for ambito in ambiti_norm:
-            self.stop_attivi.add(ambito)
-            self.audit.log(operatore, f"emergency_stop_ON:{ambito}",
-                           None, extra={"motivazione": testo})
+        gruppo = frozenset(ambiti_norm)
+        if "GLOBALE" in gruppo and len(gruppo) > 1:
+            raise ValueError("Lo stop globale non puo' essere combinato con filtri specifici.")
+        if "GLOBALE" in gruppo:
+            self.stop_gruppi = [gruppo]
+        elif frozenset({"GLOBALE"}) in self.stop_gruppi:
+            raise ValueError("Disattivare lo stop globale prima di attivare filtri specifici.")
+        elif gruppo not in self.stop_gruppi:
+            self.stop_gruppi.append(gruppo)
         self._salva_stop()
         decisioni_bloccate = self._blocca_decisioni_in_stop()
-        if len(ambiti_norm) > 1:
-            self.audit.log(operatore, "emergency_stop_ON_multiplo", None,
-                           extra={"ambiti": ambiti_norm,
-                                  "motivazione": testo,
-                                  "decisioni_bloccate": decisioni_bloccate})
+        self.audit.log(operatore, "emergency_stop_ON", None,
+                       extra={"gruppo": ambiti_norm, "semantica": "OR intra-dimensione; AND inter-dimensione",
+                              "motivazione": testo, "decisioni_bloccate": decisioni_bloccate})
         self._storico_motivazioni.append((datetime.now(), testo))
         return decisioni_bloccate
 
@@ -254,17 +283,15 @@ class OversightManager:
     def disattiva_stop_filtri(self, ambiti: Iterable[str], operatore: str, motivazione: str):
         testo = self._valida_motivazione(motivazione, consentire_duplicati=True)
         ambiti_norm = self._normalizza_ambiti(ambiti)
-        for ambito in ambiti_norm:
-            self.stop_attivi.discard(ambito)
-            self.audit.log(operatore, f"emergency_stop_OFF:{ambito}",
-                           None, extra={"motivazione": testo})
+        gruppo = frozenset(ambiti_norm)
+        if gruppo not in self.stop_gruppi:
+            raise ValueError("Il gruppo di stop selezionato non e' attivo.")
+        self.stop_gruppi.remove(gruppo)
         self._salva_stop()
         decisioni_ripristinate = self._ripristina_decisioni_fuori_stop()
-        if len(ambiti_norm) > 1:
-            self.audit.log(operatore, "emergency_stop_OFF_multiplo", None,
-                           extra={"ambiti": ambiti_norm,
-                                  "motivazione": testo,
-                                  "decisioni_ripristinate": decisioni_ripristinate})
+        self.audit.log(operatore, "emergency_stop_OFF", None,
+                       extra={"gruppo": ambiti_norm, "motivazione": testo,
+                              "decisioni_ripristinate": decisioni_ripristinate})
         self._storico_motivazioni.append((datetime.now(), testo))
         return decisioni_ripristinate
 
@@ -280,9 +307,15 @@ class OversightManager:
         return normalizzati
 
     def _stop_applicabile(self, r: Raccomandazione) -> bool:
-        return ("GLOBALE" in self.stop_attivi
-                or f"area:{r.area_geografica}" in self.stop_attivi
-                or f"tipo:{r.tipo_asset}" in self.stop_attivi)
+        for gruppo in self.stop_gruppi:
+            if "GLOBALE" in gruppo:
+                return True
+            aree = {ambito.removeprefix("area:") for ambito in gruppo if ambito.startswith("area:")}
+            tipi = {ambito.removeprefix("tipo:") for ambito in gruppo if ambito.startswith("tipo:")}
+            if ((not aree or r.area_geografica in aree)
+                    and (not tipi or r.tipo_asset in tipi)):
+                return True
+        return False
 
     def _blocca_decisioni_in_stop(self) -> int:
         bloccate = 0
@@ -290,7 +323,7 @@ class OversightManager:
             if r.stato == StatoDecisione.IN_ATTESA and self._stop_applicabile(r):
                 r.stato = StatoDecisione.BLOCCATA_STOP
                 self.audit.log("SISTEMA", "blocco_emergency_stop_attivato", r,
-                               extra={"stop_attivi": sorted(self.stop_attivi)})
+                               extra={"stop_gruppi": [sorted(g) for g in self.stop_gruppi]})
                 bloccate += 1
         return bloccate
 
@@ -300,7 +333,7 @@ class OversightManager:
             if r.stato == StatoDecisione.BLOCCATA_STOP and not self._stop_applicabile(r):
                 r.stato = StatoDecisione.IN_ATTESA
                 self.audit.log("SISTEMA", "ripristino_post_emergency_stop", r,
-                               extra={"stop_attivi": sorted(self.stop_attivi)})
+                               extra={"stop_gruppi": [sorted(g) for g in self.stop_gruppi]})
                 ripristinate += 1
         return ripristinate
 

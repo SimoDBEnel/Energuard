@@ -1,6 +1,7 @@
 {
   "stop_attivi": [
     "area:Isole",
-    "tipo:trasformatore"
+    "tipo:trasformatore",
+    "tipo:turbina_eolica"
   ]
 }
