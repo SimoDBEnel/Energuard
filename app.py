@@ -123,6 +123,72 @@ st.markdown(
         opacity: 1;
     }
 
+    div[data-baseweb="select"] > div {
+        background: #ffffff !important;
+        border-color: #66736d !important;
+        color: #17211d !important;
+    }
+
+    div[data-baseweb="select"] *,
+    div[data-baseweb="select"] input,
+    div[data-baseweb="select"] input::placeholder {
+        color: #17211d !important;
+        -webkit-text-fill-color: #17211d !important;
+        opacity: 1 !important;
+    }
+
+    div[data-baseweb="select"] svg {
+        fill: #17211d !important;
+    }
+
+    div[data-baseweb="popover"],
+    div[data-baseweb="popover"] ul,
+    ul[role="listbox"] {
+        background: #ffffff !important;
+        color: #17211d !important;
+    }
+
+    li[role="option"] {
+        background: #ffffff !important;
+        color: #17211d !important;
+    }
+
+    li[role="option"]:hover,
+    li[role="option"][aria-selected="true"] {
+        background: #d8eadf !important;
+        color: #173c2f !important;
+    }
+
+    [data-testid="stCheckbox"] [data-testid="stWidgetLabel"],
+    [data-testid="stCheckbox"] [data-testid="stWidgetLabel"] * {
+        color: #17211d !important;
+        -webkit-text-fill-color: #17211d !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stCheckbox"] label > span:first-child {
+        background: #ffffff !important;
+        border: 2px solid #66736d !important;
+    }
+
+    [data-testid="stCheckbox"] input:checked + span {
+        background: #245c48 !important;
+        border-color: #163b2e !important;
+    }
+
+    [data-testid="stExpander"] details > summary {
+        background: #eef3f0 !important;
+        color: #17211d !important;
+        border-bottom: 1px solid var(--eg-border);
+    }
+
+    [data-testid="stExpander"] details > summary *,
+    [data-testid="stExpander"] details > summary p {
+        color: #17211d !important;
+        -webkit-text-fill-color: #17211d !important;
+        opacity: 1 !important;
+    }
+
     .st-key-header_operator input:disabled {
         background: #ebe7df !important;
         color: #465550 !important;
