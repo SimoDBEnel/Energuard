@@ -36,6 +36,54 @@ PASTEL_REGIME_COLORS = {
 PASTEL_AREA_COLORS = ["#8ecae6", "#b8b8ff", "#ffd6a5", "#cdb4db"]
 PASTEL_THRESHOLD = "#9c7a5d"
 
+AZIONE_LABELS = {
+    "nessuna_azione": "Nessuna azione",
+    "ispezione_routine": "Ispezione di routine",
+    "programma_manutenzione": "Programma manutenzione",
+    "riduci_carico": "Riduzione del carico",
+    "ispezione_urgente": "Ispezione urgente",
+}
+TIPO_ASSET_LABELS = {
+    "trasformatore": "Trasformatore",
+    "turbina_eolica": "Turbina eolica",
+    "linea_AT": "Linea alta tensione",
+    "cabina_primaria": "Cabina primaria",
+}
+CRITICITA_LABELS = {
+    "standard": "Standard",
+    "alta": "Alta",
+    "critica": "Critica",
+}
+STATO_LABELS = {
+    "APPROVATA": "Approvata",
+    "MODIFICATA": "Modificata e approvata",
+    "RIFIUTATA": "Rifiutata",
+    "IN_ATTESA": "In attesa",
+    "ESCALATION": "In escalation",
+    "BLOCCATA_STOP": "Bloccata da stop",
+    "AUTO_ESEGUITA": "Eseguita automaticamente",
+}
+
+
+def etichetta_tecnica(valore, etichette=None):
+    if valore is None or valore == "-":
+        return "-"
+    testo = str(valore)
+    if etichette and testo in etichette:
+        return etichette[testo]
+    return testo.replace("_", " ").strip().capitalize()
+
+
+def etichetta_ambito(ambito):
+    if ambito == "GLOBALE":
+        return "Tutto il sistema"
+    if str(ambito).startswith("area:"):
+        return f"Area · {str(ambito).split(':', 1)[1]}"
+    if str(ambito).startswith("tipo:"):
+        tipo = str(ambito).split(":", 1)[1]
+        return f"Tipo asset · {etichetta_tecnica(tipo, TIPO_ASSET_LABELS)}"
+    return etichetta_tecnica(ambito)
+
 st.markdown(
     """
     <style>
@@ -471,7 +519,7 @@ def seleziona_stop_specifico():
 def conferma_attivazione_stop(ambiti, motivazione, operatore_corrente):
     st.error("Stai per bloccare l'esecuzione delle decisioni negli ambiti selezionati.")
     st.markdown("**Ambiti interessati**")
-    st.write(", ".join(ambiti))
+    st.write(", ".join(etichetta_ambito(ambito) for ambito in ambiti))
     st.markdown("**Motivazione registrata nell'audit trail**")
     st.info(motivazione)
     st.caption("Lo stop si applica alle nuove raccomandazioni e a quelle già presenti in coda.")
@@ -509,7 +557,7 @@ if header_feedback:
     st.success(header_feedback)
 
 if om.stop_attivi:
-    st.error(f"STOP ATTIVO · {', '.join(sorted(om.stop_attivi))}")
+    st.error(f"STOP ATTIVO · {', '.join(etichetta_ambito(a) for a in sorted(om.stop_attivi))}")
 
 if st.session_state.get("stop_panel_open", False):
     with st.container(border=True, key="stop_panel"):
@@ -524,6 +572,7 @@ if st.session_state.get("stop_panel_open", False):
                 ["GLOBALE"],
                 key="stop_scope_global",
                 on_change=seleziona_stop_globale,
+                format_func=etichetta_ambito,
             )
             aree_selezionate = st.pills(
                 "Area",
@@ -531,6 +580,7 @@ if st.session_state.get("stop_panel_open", False):
                 selection_mode="multi",
                 key="stop_scope_areas",
                 on_change=seleziona_stop_specifico,
+                format_func=lambda area: area,
             )
             tipi_selezionati = st.pills(
                 "Tipo asset",
@@ -538,6 +588,7 @@ if st.session_state.get("stop_panel_open", False):
                 selection_mode="multi",
                 key="stop_scope_types",
                 on_change=seleziona_stop_specifico,
+                format_func=lambda tipo: etichetta_tecnica(tipo, TIPO_ASSET_LABELS),
             )
             ambiti_stop = (
                 ["GLOBALE"] if globale_stop == "GLOBALE"
@@ -573,6 +624,7 @@ if st.session_state.get("stop_panel_open", False):
                     "Ambiti da riattivare",
                     sorted(om.stop_attivi),
                     key="header_resume_scopes",
+                    format_func=etichetta_ambito,
                 )
             with resume_reason:
                 motivo_ripresa = st.text_input(
@@ -647,11 +699,11 @@ def parole_chiave_revisione(r):
     parole = [
         f"asset {r.asset_id}",
         f"area {r.area_geografica}",
-        f"tipo {r.tipo_asset}",
-        f"utenza {r.criticita_utenza}",
+        f"tipo {etichetta_tecnica(r.tipo_asset, TIPO_ASSET_LABELS)}",
+        f"utenza {etichetta_tecnica(r.criticita_utenza, CRITICITA_LABELS)}",
         f"rischio {r.prob_guasto:.2f}",
         f"confidenza {r.confidenza:.2f}",
-        r.azione_proposta.replace("_", " "),
+        etichetta_tecnica(r.azione_proposta, AZIONE_LABELS),
     ]
     if r.honeypot:
         parole.extend(["rischio basso", "azione urgente incoerente"])
@@ -804,7 +856,7 @@ def evento_leggibile(evento):
         return "Stop disattivato"
     if evento.startswith("in_coda_"):
         return "Inserita in coda"
-    return mapping.get(evento, evento.replace("_", " "))
+    return mapping.get(evento, etichetta_tecnica(evento))
 
 
 STATO_COLORI = {
@@ -822,7 +874,7 @@ STATO_COLORI = {
 def stato_leggibile(stato):
     if not stato or stato == "-":
         return "-"
-    return str(stato).replace("_", " ").upper()
+    return etichetta_tecnica(stato, STATO_LABELS)
 
 
 def stato_filtro_leggibile(stato):
@@ -1011,8 +1063,8 @@ def mostra_dettaglio_log(record):
         st.markdown(f"**Asset:** {decisione.get('asset_id', '-')}")
         st.markdown(f"**Decision ID:** {decisione.get('id', '-')}")
         st.markdown(f"**Livello:** {decisione.get('livello', '-')}")
-        st.markdown(f"**Stato:** {decisione.get('stato', '-')}")
-        st.markdown(f"**Azione:** {decisione.get('azione', '-')}")
+        st.markdown(f"**Stato:** {stato_leggibile(decisione.get('stato', '-'))}")
+        st.markdown(f"**Azione:** {etichetta_tecnica(decisione.get('azione'), AZIONE_LABELS)}")
         st.markdown(f"**Motivazione:** {decisione.get('motivazione', '-')}")
 
     if messaggio_llm:
@@ -1072,7 +1124,8 @@ with tab_coda:
             filtro_tipo = st.multiselect(
                 "Tipo asset",
                 sorted({r.tipo_asset for r in pendenti}),
-                key="filtro_attivita_tipo"
+                key="filtro_attivita_tipo",
+                format_func=lambda tipo: etichetta_tecnica(tipo, TIPO_ASSET_LABELS),
             )
         with f6:
             solo_honeypot = st.checkbox("Solo controlli", key="filtro_attivita_honeypot")
@@ -1102,7 +1155,7 @@ with tab_coda:
             livello_label = {"HIC": "Decide solo l'operatore", "HITL": "Serve conferma", "HOTL": "Solo monitoraggio"}
             descrizione_lavorabilita = f"{r.livello.value} - {livello_label.get(r.livello.value, 'Da verificare')}"
             with st.expander(
-                    f"{livello_emoji.get(r.livello.value, '⚪')} {descrizione_lavorabilita} · {testo_sla(r)} · {r.asset_id} · {r.tipo_asset} · {r.area_geografica}", expanded=r.stato == StatoDecisione.ESCALATION):
+                    f"{livello_emoji.get(r.livello.value, '⚪')} {descrizione_lavorabilita} · {testo_sla(r)} · {r.asset_id} · {etichetta_tecnica(r.tipo_asset, TIPO_ASSET_LABELS)} · {r.area_geografica}", expanded=r.stato == StatoDecisione.ESCALATION):
                 left, right = st.columns([1.3, 1.7])
                 with left:
                     st.markdown(
@@ -1112,9 +1165,9 @@ with tab_coda:
                     )
                     st.markdown(f"**Supervisione:** {r.livello.value}")
                     st.markdown(f"**SLA:** {testo_sla(r)}")
-                    st.markdown(f"**Stato:** {r.stato.value}")
-                    st.markdown(f"**Utenza:** {r.criticita_utenza}")
-                    st.markdown(f"**Azione consigliata:** {r.azione_proposta}")
+                    st.markdown(f"**Stato:** {stato_leggibile(r.stato.value)}")
+                    st.markdown(f"**Utenza:** {etichetta_tecnica(r.criticita_utenza, CRITICITA_LABELS)}")
+                    st.markdown(f"**Azione consigliata:** {etichetta_tecnica(r.azione_proposta, AZIONE_LABELS)}")
                 with right:
                     st.markdown(f"**Esito richiesto:** {livello_label.get(r.livello.value, 'Da verificare')}")
                     sp = spiegazione_per(r)
@@ -1125,7 +1178,8 @@ with tab_coda:
 
                 mot = st.text_area("Motivazione dell'operatore", key=f"m{r.id}", help="Scrivere una descrizione chiara di perché si approva, modifica o rifiuta la decisione.")
                 az = st.selectbox("Azione da applicare", AZIONI,
-                                  index=AZIONI.index(r.azione_proposta), key=f"a{r.id}")
+                                  index=AZIONI.index(r.azione_proposta), key=f"a{r.id}",
+                                  format_func=lambda azione: etichetta_tecnica(azione, AZIONE_LABELS))
                 keywords = st.multiselect(
                     "Elementi verificati prima dell'approvazione",
                     parole_chiave_revisione(r),
@@ -1162,67 +1216,111 @@ with tab_coda:
 # ----------------------------------------------------------------------
 with tab_matrice:
     st.subheader("Mappa rischio per regione")
-    st.caption("Ogni grafico mostra una regione. I punti piu' in alto sono piu' rischiosi; i punti piu' a sinistra hanno meno confidenza del modello.")
+    st.caption("Una lettura immediata di dove si concentra il rischio e quali asset richiedono attenzione per primi.")
     df_plot = pred.rename(columns={"proba": "rischio"}).copy()
+    df_plot["tipo_asset_label"] = df_plot["tipo_asset"].map(
+        lambda tipo: etichetta_tecnica(tipo, TIPO_ASSET_LABELS))
     df_plot["confidenza"] = pd.to_numeric(df_plot["confidenza"], errors="coerce")
     df_plot["rischio"] = pd.to_numeric(df_plot["rischio"], errors="coerce")
-    regioni = sorted(df_plot["area_geografica"].dropna().unique())
-    colori_regioni = {
-        area: PASTEL_AREA_COLORS[i % len(PASTEL_AREA_COLORS)]
-        for i, area in enumerate(regioni)
-    }
+    df_plot["fascia_rischio"] = pd.cut(
+        df_plot["rischio"], bins=[-0.01, 0.30, 0.60, 1.0],
+        labels=["Basso", "Medio", "Alto"], include_lowest=True,
+    )
+    df_plot["bassa_confidenza"] = df_plot["confidenza"] < om.soglia_conf
 
-    zone_df = pd.DataFrame([
-        {"regime": "HOTL", "x_min": 0.80, "x_max": 1.00, "y_min": 0.00, "y_max": 0.60},
-        {"regime": "HITL", "x_min": 0.00, "x_max": 1.00, "y_min": 0.60, "y_max": 1.00},
-        {"regime": "HIC", "x_min": 0.00, "x_max": 0.80, "y_min": 0.00, "y_max": 1.00},
-    ])
+    riepilogo_area = (
+        df_plot.groupby("area_geografica", observed=True)
+        .agg(asset=("asset_id", "count"), rischio_medio=("rischio", "mean"),
+             rischio_massimo=("rischio", "max"), bassa_confidenza=("bassa_confidenza", "sum"))
+        .reset_index()
+    )
+    area_prioritaria = riepilogo_area.sort_values(
+        ["rischio_medio", "rischio_massimo"], ascending=False).iloc[0]
+    alto_rischio = int((df_plot["fascia_rischio"] == "Alto").sum())
+    bassa_confidenza = int(df_plot["bassa_confidenza"].sum())
 
-    zones = (
-        alt.Chart(zone_df)
-        .mark_rect(opacity=0.34)
+    sintesi = st.columns(3)
+    sintesi[0].metric("Regione più esposta", area_prioritaria["area_geografica"],
+                      delta=f"Rischio medio {area_prioritaria['rischio_medio']:.0%}",
+                      delta_color="off")
+    sintesi[1].metric("Asset ad alto rischio", alto_rischio,
+                      delta="Rischio almeno 60%", delta_color="off")
+    sintesi[2].metric("Da verificare per incertezza", bassa_confidenza,
+                      delta="Confidenza sotto 80%", delta_color="off")
+
+    st.markdown("#### Come è distribuito il rischio")
+    st.caption("Ogni barra rappresenta tutti gli asset della regione. Il numero nel segmento indica quanti appartengono a quel livello.")
+    distribuzione = (
+        df_plot.groupby(["area_geografica", "fascia_rischio"], observed=True)
+        .size().rename("asset").reset_index()
+    )
+    distribuzione["totale_area"] = distribuzione.groupby("area_geografica")["asset"].transform("sum")
+    distribuzione["percentuale"] = distribuzione["asset"] / distribuzione["totale_area"]
+    ordine_aree = riepilogo_area.sort_values("rischio_medio", ascending=False)["area_geografica"].tolist()
+    colori_rischio = ["#26734d", "#b56705", "#b42318"]
+
+    barre = (
+        alt.Chart(distribuzione)
+        .mark_bar(height=34, cornerRadiusEnd=3)
         .encode(
-            x=alt.X("x_min:Q", scale=alt.Scale(domain=[0, 1])),
-            x2="x_max:Q",
-            y=alt.Y("y_min:Q", scale=alt.Scale(domain=[0, 1])),
-            y2="y_max:Q",
-            color=alt.Color("regime:N", scale=alt.Scale(domain=list(PASTEL_REGIME_COLORS), range=list(PASTEL_REGIME_COLORS.values())), legend=alt.Legend(title="Regime")),
-            tooltip=["regime:N"]
+            y=alt.Y("area_geografica:N", title=None, sort=ordine_aree,
+                    axis=alt.Axis(labelFontSize=14, labelFontWeight="bold")),
+            x=alt.X("asset:Q", title="Numero di asset", stack="zero",
+                    axis=alt.Axis(tickMinStep=1, grid=False)),
+            color=alt.Color("fascia_rischio:N", title="Livello di rischio",
+                            sort=["Basso", "Medio", "Alto"],
+                            scale=alt.Scale(domain=["Basso", "Medio", "Alto"], range=colori_rischio)),
+            order=alt.Order("fascia_rischio:N", sort="ascending"),
+            tooltip=[
+                alt.Tooltip("area_geografica:N", title="Regione"),
+                alt.Tooltip("fascia_rischio:N", title="Livello"),
+                alt.Tooltip("asset:Q", title="Asset"),
+                alt.Tooltip("percentuale:Q", title="Quota nella regione", format=".0%"),
+            ],
         )
     )
-
-    labels = alt.Chart(pd.DataFrame([
-        {"x": 0.90, "y": 0.25, "label": "HOTL\nmonitoraggio"},
-        {"x": 0.50, "y": 0.80, "label": "HITL\nconferma"},
-        {"x": 0.35, "y": 0.35, "label": "HIC\noperatore"},
-    ])).mark_text(fontSize=12, fontWeight="bold", color="#31413d", align="center").encode(
-        x="x:Q",
-        y="y:Q",
-        text="label:N"
+    numeri = barre.mark_text(color="white", fontWeight="bold", fontSize=12).encode(
+        text=alt.Text("asset:Q", format="d")
+    )
+    st.altair_chart(
+        (barre + numeri).properties(height=230).configure_view(stroke=None),
+        use_container_width=True,
     )
 
-    threshold_v = alt.Chart(pd.DataFrame({"x": [0.80]})).mark_rule(color=PASTEL_THRESHOLD, strokeDash=[6, 4]).encode(x="x:Q")
-    threshold_h = alt.Chart(pd.DataFrame({"y": [0.60]})).mark_rule(color=PASTEL_THRESHOLD, strokeDash=[6, 4]).encode(y="y:Q")
-
-    cols = st.columns(2)
-    for i, area in enumerate(regioni):
-        df_area = df_plot[df_plot["area_geografica"] == area]
-        points = (
-            alt.Chart(df_area)
-            .mark_circle(size=58, opacity=0.82, color=colori_regioni[area])
-            .encode(
-                x=alt.X("confidenza:Q", title="Confidenza", scale=alt.Scale(domain=[0, 1])),
-                y=alt.Y("rischio:Q", title="Rischio", scale=alt.Scale(domain=[0, 1])),
-                tooltip=["asset_id:N", "tipo_asset:N", "confidenza:Q", "rischio:Q"],
-            )
+    st.markdown("#### Asset da controllare per primi")
+    st.caption("Sono mostrati gli asset con rischio più alto; una confidenza bassa richiede ulteriore verifica umana.")
+    prioritari = df_plot.nlargest(10, "rischio").copy().sort_values("rischio")
+    prioritari["descrizione"] = prioritari.apply(
+        lambda riga: f"{riga['asset_id']} · {riga['area_geografica']} · {riga['tipo_asset_label']}", axis=1)
+    prioritari["rischio_label"] = prioritari["rischio"].map(lambda valore: f"{valore:.0%}")
+    grafico_priorita = (
+        alt.Chart(prioritari)
+        .mark_bar(height=22, cornerRadiusEnd=4)
+        .encode(
+            y=alt.Y("descrizione:N", title=None, sort="-x", axis=alt.Axis(labelLimit=320)),
+            x=alt.X("rischio:Q", title="Probabilità di guasto entro 30 giorni",
+                    scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
+            color=alt.Color("fascia_rischio:N", legend=None,
+                            scale=alt.Scale(domain=["Basso", "Medio", "Alto"], range=colori_rischio)),
+            tooltip=[
+                alt.Tooltip("asset_id:N", title="Asset"),
+                alt.Tooltip("area_geografica:N", title="Regione"),
+                alt.Tooltip("tipo_asset_label:N", title="Tipo asset"),
+                alt.Tooltip("rischio:Q", title="Rischio", format=".0%"),
+                alt.Tooltip("confidenza:Q", title="Confidenza", format=".0%"),
+            ],
         )
-        chart = (
-            zones + threshold_v + threshold_h + labels + points
-        ).properties(title=f"Regione {area}", width=410, height=320)
-        with cols[i % 2]:
-            st.altair_chart(chart, use_container_width=True)
+    )
+    etichette_priorita = grafico_priorita.mark_text(
+        align="left", baseline="middle", dx=5, color="#17211d", fontWeight="bold"
+    ).encode(text="rischio_label:N")
+    st.altair_chart(
+        (grafico_priorita + etichette_priorita).properties(height=330).configure_view(stroke=None),
+        use_container_width=True,
+    )
 
-    st.caption("Ogni riquadro mostra una sola regione con le stesse soglie operative, così l'operatore può leggere più facilmente il regime di supervisione per area.")
+    st.info("Lettura rapida: rosso indica rischio alto (almeno 60%); ambra rischio medio; verde rischio basso. "
+            "La confidenza non misura il rischio: indica quanto il modello è sicuro della propria stima.")
 
 # ----------------------------------------------------------------------
 with tab_kpi:
