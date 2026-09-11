@@ -112,6 +112,33 @@ class TestOversightValidation(unittest.TestCase):
         om.attiva_stop_filtri(["area:Nord"], "OP-01", "Guasto confermato su area Nord")
         self.assertEqual(om.stop_attivi, {"area:Nord"})
 
+    def test_stop_globale_e_filtri_specifici_sono_esclusivi(self):
+        with TemporaryDirectory() as directory:
+            om = OversightManager(AuditLogger(str(Path(directory) / "audit.jsonl")))
+            with self.assertRaises(ValueError):
+                om.attiva_stop_filtri(["GLOBALE", "area:Nord"], "OP-01",
+                                      "Tentativo combinazione globale non valida")
+            om.attiva_stop("GLOBALE", "OP-01", "Arresto completo per anomalia critica")
+            with self.assertRaises(ValueError):
+                om.attiva_stop("area:Nord", "OP-01", "Arresto locale durante stop globale")
+
+    def test_mitigazione_prudenziale_promuove_hotl_ed_e_auditata(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.jsonl"
+            om = OversightManager(AuditLogger(str(path)))
+            r = self._raccomandazione("A-MIT")
+            r.prob_guasto = 0.2
+            r.azione_proposta = "ispezione_routine"
+
+            self.assertEqual(om.route(r), LivelloSupervisione.HOTL)
+            om.configura_mitigazione_prudenziale(True, ["drift oltre soglia"])
+            self.assertEqual(om.route(r), LivelloSupervisione.HITL)
+            om.configura_mitigazione_prudenziale(False, [], "OP-01")
+            self.assertEqual(om.route(r), LivelloSupervisione.HOTL)
+
+            eventi = [json.loads(riga)["evento"] for riga in path.read_text().splitlines()]
+            self.assertEqual(eventi, ["mitigazione_prudenziale_ON", "mitigazione_prudenziale_OFF"])
+
     def test_audit_log_salva_messaggio_llm_nella_decisione(self):
         path = Path("test_audit_llm_temp.jsonl")
         if path.exists():

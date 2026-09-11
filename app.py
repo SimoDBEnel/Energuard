@@ -297,7 +297,7 @@ st.markdown(
         border: 2px solid #66736d !important;
     }
 
-    [data-testid="stCheckbox"] input:checked + span {
+    [data-testid="stCheckbox"] label:has(input:checked) > span:first-child {
         background: #245c48 !important;
         border-color: #163b2e !important;
     }
@@ -579,7 +579,10 @@ def conferma_attivazione_stop(ambiti, motivazione, operatore_corrente):
     st.markdown("**Motivazione registrata nell'audit trail**")
     st.info(motivazione)
     st.caption("Lo stop si applica alle nuove raccomandazioni e a quelle già presenti in coda.")
-    conferma = st.checkbox("Confermo di aver verificato ambiti e motivazione")
+    conferma = st.checkbox(
+        "Confermo di aver verificato ambiti e motivazione",
+        key="conferma_stop_operativo",
+    )
     col_conferma, col_annulla = st.columns(2)
     if col_conferma.button("Conferma stop", type="primary", disabled=not conferma,
                            use_container_width=True):
@@ -732,7 +735,7 @@ summary_cols = st.columns(4)
 with summary_cols[0]:
     st.metric("Attività da lavorare", len(pendenti))
 with summary_cols[1]:
-    st.metric("Attività bloccate", len(bloccate_stop), delta=f"{len(om.stop_attivi)} filtri di stop")
+    st.metric("Attività bloccate", len(bloccate_stop), delta=f"{len(om.stop_gruppi)} gruppi di stop")
 with summary_cols[2]:
     st.metric("Escalation SLA", len(in_escalation), delta=f"SLA {om.sla_minuti} min")
 
