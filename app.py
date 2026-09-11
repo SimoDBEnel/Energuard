@@ -85,6 +85,50 @@ st.markdown(
         opacity: 1 !important;
     }
 
+    .eg-level {
+        margin-bottom: 0.9rem;
+    }
+
+    .eg-level__header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 0.35rem;
+        color: #17211d;
+    }
+
+    .eg-level__label {
+        font-weight: 700;
+    }
+
+    .eg-level__value {
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .eg-level__track {
+        width: 100%;
+        height: 0.75rem;
+        overflow: hidden;
+        background: #e1e5e2;
+        border: 1px solid #aeb8b2;
+        border-radius: 4px;
+    }
+
+    .eg-level__fill {
+        height: 100%;
+        min-width: 2px;
+    }
+
+    .eg-level--good .eg-level__fill { background: #26734d; }
+    .eg-level--warn .eg-level__fill { background: #b56705; }
+    .eg-level--danger .eg-level__fill { background: #b42318; }
+
+    .eg-level--good .eg-level__value { color: #1c5a3b; }
+    .eg-level--warn .eg-level__value { color: #854d0e; }
+    .eg-level--danger .eg-level__value { color: #8f1d14; }
+
     .stButton > button {
         border-radius: 10px;
         border: 1px solid var(--eg-accent);
@@ -614,6 +658,38 @@ def parole_chiave_revisione(r):
     return list(dict.fromkeys(parole))
 
 
+def indicatore_livello(etichetta: str, valore: float, tipo: str) -> str:
+    valore = max(0.0, min(1.0, float(valore)))
+    if tipo == "rischio":
+        if valore >= 0.60:
+            classe, giudizio = "danger", "Alto"
+        elif valore >= 0.30:
+            classe, giudizio = "warn", "Medio"
+        else:
+            classe, giudizio = "good", "Basso"
+    else:
+        if valore >= 0.80:
+            classe, giudizio = "good", "Alta"
+        elif valore >= 0.60:
+            classe, giudizio = "warn", "Media"
+        else:
+            classe, giudizio = "danger", "Bassa"
+    percentuale_valore = round(valore * 100)
+    return f"""
+        <div class="eg-level eg-level--{classe}">
+            <div class="eg-level__header">
+                <span class="eg-level__label">{etichetta}</span>
+                <span class="eg-level__value">{valore:.2f} · {giudizio}</span>
+            </div>
+            <div class="eg-level__track" role="progressbar"
+                 aria-label="{etichetta}: {percentuale_valore}% - {giudizio}"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percentuale_valore}">
+                <div class="eg-level__fill" style="width: {percentuale_valore}%"></div>
+            </div>
+        </div>
+    """
+
+
 def cooldown_pronto(decision_id: str, secondi: int = 10):
     key = f"cooldown_{decision_id}"
     if key not in st.session_state:
@@ -1029,8 +1105,11 @@ with tab_coda:
                     f"{livello_emoji.get(r.livello.value, '⚪')} {descrizione_lavorabilita} · {testo_sla(r)} · {r.asset_id} · {r.tipo_asset} · {r.area_geografica}", expanded=r.stato == StatoDecisione.ESCALATION):
                 left, right = st.columns([1.3, 1.7])
                 with left:
-                    st.markdown(f"**Rischio stimato:** {r.prob_guasto:.2f}")
-                    st.markdown(f"**Confidenza modello:** {r.confidenza:.2f}")
+                    st.markdown(
+                        indicatore_livello("Rischio stimato", r.prob_guasto, "rischio")
+                        + indicatore_livello("Confidenza modello", r.confidenza, "confidenza"),
+                        unsafe_allow_html=True,
+                    )
                     st.markdown(f"**Supervisione:** {r.livello.value}")
                     st.markdown(f"**SLA:** {testo_sla(r)}")
                     st.markdown(f"**Stato:** {r.stato.value}")
