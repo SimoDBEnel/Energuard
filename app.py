@@ -427,19 +427,33 @@ st.markdown(
         -webkit-text-fill-color: #ffffff !important;
     }
 
-    [data-baseweb="tab-list"] {
-        gap: 0.35rem;
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {
+        gap: 0.8rem;
+        overflow-x: auto;
+        padding: 0.25rem 0.1rem 0.45rem;
     }
 
-    [data-baseweb="tab"] {
-        background: rgba(255, 253, 248, 0.72);
-        border-radius: 10px 10px 0 0;
-        color: var(--eg-muted);
+    [data-testid="stTabs"] [data-baseweb="tab"] {
+        min-height: 3rem;
+        padding: 0.65rem 1.15rem;
+        background: rgba(255, 253, 248, 0.88);
+        border: 1px solid var(--eg-border);
+        border-radius: 8px 8px 0 0;
+        color: #52635c;
+        font-weight: 650;
+        white-space: nowrap;
     }
 
-    [data-baseweb="tab"][aria-selected="true"] {
+    [data-testid="stTabs"] [data-baseweb="tab"]:hover {
+        background: #eef3f0;
+        color: #263b34;
+    }
+
+    [data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
         background: #dcefe6;
-        color: #2f5144;
+        border-color: var(--eg-accent-strong);
+        color: #214c3c;
+        font-weight: 750;
     }
 
     div[data-testid="stAlert"] {
