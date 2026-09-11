@@ -71,6 +71,20 @@ st.markdown(
         padding: 0.6rem;
     }
 
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricValue"] * {
+        color: #17211d !important;
+        -webkit-text-fill-color: #17211d !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stMetricDelta"],
+    [data-testid="stMetricDelta"] * {
+        color: #245c48 !important;
+        -webkit-text-fill-color: #245c48 !important;
+        opacity: 1 !important;
+    }
+
     .stButton > button {
         border-radius: 10px;
         border: 1px solid var(--eg-accent);
