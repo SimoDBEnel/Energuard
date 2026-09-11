@@ -66,7 +66,7 @@ class TestOversightValidation(unittest.TestCase):
             self.assertTrue(record["decisione"]["honeypot"])
             self.assertEqual(record["extra"]["esito_tentato"], "APPROVATA")
 
-    def test_honeypot_non_si_aggira_con_modifica_e_approvazione(self):
+    def test_honeypot_non_si_aggira_con_modifica_fittizia(self):
         with TemporaryDirectory() as directory:
             om = OversightManager(AuditLogger(str(Path(directory) / "audit.jsonl")))
             r = self._raccomandazione("A-HP-MOD", honeypot=True)
@@ -74,9 +74,28 @@ class TestOversightValidation(unittest.TestCase):
             with self.assertRaises(ValueError):
                 om.revisiona(r.id, StatoDecisione.MODIFICATA, "OP-01",
                              "Modifica apparentemente valida ma automatica",
-                             azione_modificata="nessuna_azione",
+                             azione_modificata=r.azione_proposta,
                              evidenze_keywords=["rischio", "confidenza"])
             self.assertEqual(r.stato, StatoDecisione.IN_ATTESA)
+
+    def test_honeypot_corretto_con_azione_diversa_e_rilevato(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.jsonl"
+            om = OversightManager(AuditLogger(str(path)))
+            r = self._raccomandazione("A-HP-CORRETTO", honeypot=True)
+            r.livello = LivelloSupervisione.HITL
+            om.coda.append(r)
+
+            om.revisiona(r.id, StatoDecisione.MODIFICATA, "OP-01",
+                         "Rischio basso incompatibile con intervento urgente",
+                         azione_modificata="nessuna_azione",
+                         evidenze_keywords=["rischio", "confidenza"])
+
+            self.assertEqual(r.stato, StatoDecisione.MODIFICATA)
+            metriche = metriche_rubber_stamping([
+                json.loads(line) for line in path.read_text().splitlines()])
+            self.assertEqual(metriche["honeypot_rilevati"], 1)
+            self.assertEqual(metriche["honeypot_falliti"], 0)
 
     def test_raccomandazione_bloccata_da_stop_resta_in_coda(self):
         with TemporaryDirectory() as directory:

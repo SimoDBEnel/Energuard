@@ -45,6 +45,14 @@ AZIONI = ["nessuna_azione", "ispezione_routine", "programma_manutenzione",
           "riduci_carico", "ispezione_urgente"]
 
 
+def _record_honeypot(record: dict) -> tuple[Optional[str], bool]:
+    decisione = record.get("decisione", {})
+    decision_id = decisione.get("id")
+    is_honeypot = bool(decisione.get("honeypot")) or str(
+        decisione.get("asset_id", "")).startswith("HP-")
+    return decision_id, bool(decision_id and is_honeypot)
+
+
 def metriche_rubber_stamping(records: Iterable[dict], soglia_breve: int = 30,
                               soglia_rapida_secondi: int = 10) -> dict:
     """Calcola separatamente segnali testuali, temporali e controlli honeypot."""
@@ -76,16 +84,13 @@ def metriche_rubber_stamping(records: Iterable[dict], soglia_breve: int = 30,
     honeypot_falliti = set()
     honeypot_rilevati = set()
     for record in records:
-        decisione = record.get("decisione", {})
-        decision_id = decisione.get("id")
-        is_honeypot = bool(decisione.get("honeypot")) or str(
-            decisione.get("asset_id", "")).startswith("HP-")
-        if not decision_id or not is_honeypot:
+        decision_id, is_honeypot = _record_honeypot(record)
+        if not is_honeypot:
             continue
         honeypot_esposti.add(decision_id)
         if record.get("evento") == "allerta_honeypot_approvato":
             honeypot_falliti.add(decision_id)
-        elif record.get("evento") == "revisione_RIFIUTATA":
+        elif record.get("evento") in ("revisione_RIFIUTATA", "revisione_MODIFICATA"):
             honeypot_rilevati.add(decision_id)
 
     return {
@@ -268,7 +273,11 @@ class OversightManager:
         r = self._trova(decision_id)
         if r.stato not in (StatoDecisione.IN_ATTESA, StatoDecisione.ESCALATION):
             raise ValueError(f"Decisione {decision_id} gia' chiusa: {r.stato}")
-        if r.honeypot and esito in (StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA):
+        honeypot_approvato_invariato = r.honeypot and (
+            esito == StatoDecisione.APPROVATA
+            or (esito == StatoDecisione.MODIFICATA
+                and (not azione_modificata or azione_modificata == r.azione_proposta)))
+        if honeypot_approvato_invariato:
             r.revisore, r.motivazione, r.evidenze_keywords = revisore, testo, keywords
             self.audit.log(revisore, "allerta_honeypot_approvato", r,
                            extra={"messaggio": r.honeypot_messaggio,

@@ -12,7 +12,6 @@ vostra: Streamlit e' solo il default comodo, potete usare React/Gradio.
 import json
 import os
 from datetime import datetime, timedelta
-from random import Random
 
 import altair as alt
 import pandas as pd
@@ -63,6 +62,12 @@ STATO_LABELS = {
     "BLOCCATA_STOP": "Bloccata da stop",
     "AUTO_ESEGUITA": "Eseguita automaticamente",
 }
+
+HONEYPOT_RACCONTO_ORIGINALE = (
+    "Un inventore distratto trovò nel solaio una mappa con una X rossa. "
+    "Partì su una vecchia automobile insieme al nipote, attraversò un ponte "
+    "traballante e scoprì che il tesoro era una scatola piena di bulloni dorati."
+)
 
 
 def etichetta_tecnica(valore, etichette=None):
@@ -517,14 +522,13 @@ def bootstrap():
             spiegazione=[],
         )
         prepara(r)
-        audit.log("SISTEMA", "honeypot_inserito", r,
-              extra={"criterio": "vero negativo a rischio minimo con azione urgente incoerente"})
         om.sottometti(r)
     # Honeypot anti rubber-stamping: casi palesemente incoerenti inseriti nel flusso.
     candidati_honeypot = pred[(pred["y_true"] == 0) & (pred["y_pred"] == 0)].nsmallest(6, "proba")
-    for _, riga in candidati_honeypot.sample(
-            n=min(2, len(candidati_honeypot)), random_state=Random().randint(1, 999999)
-    ).iterrows():
+    selezionati_honeypot = candidati_honeypot.sample(
+        n=min(3, len(candidati_honeypot)), random_state=42)
+    for indice, (_, riga) in enumerate(selezionati_honeypot.iterrows()):
+        narrativo = indice == 2
         r = Raccomandazione(
             asset_id=f"HP-{riga['asset_id']}",
             tipo_asset=riga["tipo_asset"],
@@ -538,6 +542,22 @@ def bootstrap():
             honeypot_messaggio="Rischio molto basso, utenza standard e nessuna evidenza critica: approvare l'urgenza indica possibile rubber stamping.",
         )
         prepara(r)
+        if narrativo:
+            r.messaggio_llm = {
+                "testo": HONEYPOT_RACCONTO_ORIGINALE,
+                "incertezza": "Il testo non contiene evidenze tecniche riferibili all'asset.",
+                "fonte": "controllo_sintetico:narrativo",
+                "latenza_ms": 0,
+            }
+            r.honeypot_messaggio = (
+                "La spiegazione era un testo narrativo completamente estraneo "
+                "alla manutenzione dell'asset."
+            )
+        audit.log("SISTEMA", "honeypot_inserito", r, extra={
+            "tipo": "testo_fuori_dominio" if narrativo else "incoerenza_numerica",
+            "criterio": "testo narrativo privo di evidenze tecniche" if narrativo
+            else "vero negativo a rischio minimo con azione urgente incoerente",
+        })
         om.sottometti(r)
     return om, audit, pred, spiegatore
 
