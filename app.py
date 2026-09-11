@@ -107,6 +107,10 @@ st.markdown(
         color: var(--eg-text);
     }
 
+    [data-testid="stHeader"] {
+        background: rgba(247, 244, 239, 0.92) !important;
+    }
+
     h1, h2, h3, .stMarkdown, .stCaption, label {
         color: var(--eg-text) !important;
     }
@@ -197,9 +201,35 @@ st.markdown(
     }
 
     div[data-baseweb="input"] > div,
-    div[data-baseweb="textarea"] > div {
+    div[data-baseweb="textarea"] > div,
+    [data-testid="stTextInputRootElement"],
+    [data-testid="stTextAreaRootElement"] {
         background: var(--eg-surface) !important;
         border-color: var(--eg-border) !important;
+    }
+
+    button[data-testid="stBaseButton-secondary"],
+    button[data-testid="stBaseButton-tertiary"] {
+        background: #ffffff !important;
+        border-color: #66736d !important;
+        color: #17211d !important;
+    }
+
+    button[data-testid="stBaseButton-secondary"] *,
+    button[data-testid="stBaseButton-tertiary"] * {
+        color: #17211d !important;
+        -webkit-text-fill-color: #17211d !important;
+    }
+
+    [data-testid="stElementToolbarButtonContainer"] {
+        background: #fffdf8 !important;
+        border: 1px solid var(--eg-border) !important;
+        color: #17211d !important;
+    }
+
+    [data-testid="stElementToolbarButtonContainer"] svg {
+        fill: #17211d !important;
+        color: #17211d !important;
     }
 
     div[data-baseweb="input"] input,
