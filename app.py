@@ -23,7 +23,7 @@ from bias_detector import BiasDetector
 from explainer import ConfigLLM, Spiegazione, crea_spiegatore, estrai_fattori
 from utils_io import carica_csv
 from oversight_manager import (OversightManager, Raccomandazione,
-                               StatoDecisione, AZIONI)
+                               StatoDecisione, AZIONI, metriche_rubber_stamping)
 
 st.set_page_config(page_title="EnerGuard | Console Operatore",
                    layout="wide", page_icon="⚡")
@@ -517,6 +517,8 @@ def bootstrap():
             spiegazione=[],
         )
         prepara(r)
+        audit.log("SISTEMA", "honeypot_inserito", r,
+              extra={"criterio": "vero negativo a rischio minimo con azione urgente incoerente"})
         om.sottometti(r)
     # Honeypot anti rubber-stamping: casi palesemente incoerenti inseriti nel flusso.
     candidati_honeypot = pred[(pred["y_true"] == 0) & (pred["y_pred"] == 0)].nsmallest(6, "proba")
@@ -569,7 +571,7 @@ def conferma_attivazione_stop(ambiti, motivazione, operatore_corrente):
     st.markdown("**Motivazione registrata nell'audit trail**")
     st.info(motivazione)
     st.caption("Lo stop si applica alle nuove raccomandazioni e a quelle già presenti in coda.")
-    conferma = st.checkbox(
+    conferma = st.toggle(
         "Confermo di aver verificato ambiti e motivazione",
         key="conferma_stop_operativo",
     )
@@ -663,6 +665,7 @@ if st.session_state.get("stop_panel_open", False):
             try:
                 om._valida_motivazione(mot_stop, consentire_duplicati=True)
                 om._normalizza_ambiti(ambiti_stop)
+                st.session_state["conferma_stop_operativo"] = False
                 conferma_attivazione_stop(ambiti_stop, mot_stop.strip(), operatore)
             except ValueError as errore:
                 st.error(str(errore))
@@ -808,7 +811,7 @@ def cooldown_pronto(decision_id: str, secondi: int = 10):
         st.session_state[key] = datetime.now()
     elapsed = datetime.now() - st.session_state[key]
     residuo = max(0, secondi - int(elapsed.total_seconds()))
-    return elapsed >= timedelta(seconds=secondi), residuo
+    return elapsed >= timedelta(seconds=secondi), residuo, elapsed.total_seconds()
 
 
 def testo_sla(r):
@@ -1061,13 +1064,7 @@ def tabella_kpi(records):
         for decisione in decisioni_audit.values()
     )
 
-    revisioni_log = [r for r in records if str(r.get("evento", "")).startswith("revisione_")]
-    motivazioni = [r.get("decisione", {}).get("motivazione") for r in revisioni_log]
-    motivazioni = [m.strip() for m in motivazioni if isinstance(m, str) and m.strip()]
-    motivazioni_normalizzate = [" ".join(m.split()).casefold() for m in motivazioni]
-    duplicati = len(motivazioni_normalizzate) - len(set(motivazioni_normalizzate))
-    brevi = sum(1 for m in motivazioni if len(m) < 30)
-    rubber = brevi + duplicati
+    rubber = metriche_rubber_stamping(records)
 
     bd = BiasDetector()
     valut = pred.copy()
@@ -1123,7 +1120,10 @@ def tabella_kpi(records):
         ["A1", "Auto-esecuzione impropria", f"{len(auto_improprie)} / {len(hic_hitl)}", "0 assoluto", "OK" if not auto_improprie else "Allarme"],
         ["A2", "Override umano", percentuale(len(override), len(chiuse)), "5% - 40%", "Da monitorare" if chiuse else "n/d"],
         ["A3", "Tempo revisione", f"media {manager_kpi['tempo_medio_revisione_min'] or 'n/d'} min; mediana {manager_kpi['tempo_mediano_revisione_min'] or 'n/d'} min", "30 sec - 5 min", "Da monitorare"],
-        ["A4", "Indice rubber-stamping", f"brevi {manager_kpi['motivazioni_brevi_pct'] or 0}% + duplicati {percentuale(duplicati, len(motivazioni))}", "< 10%", "OK" if not motivazioni or rubber / max(len(motivazioni), 1) < 0.10 else "Allarme"],
+        ["A4a", "Motivazioni approvative brevi", percentuale(rubber["motivazioni_brevi"], rubber["motivazioni_valide"]), "< 10%", "OK" if not rubber["motivazioni_valide"] or rubber["motivazioni_brevi"] / rubber["motivazioni_valide"] < 0.10 else "Allarme"],
+        ["A4b", "Motivazioni duplicate per operatore", percentuale(rubber["motivazioni_duplicate"], rubber["motivazioni_valide"]), "< 5%", "OK" if not rubber["motivazioni_valide"] or rubber["motivazioni_duplicate"] / rubber["motivazioni_valide"] < 0.05 else "Allarme"],
+        ["A4c", "Approvazioni prima del cooldown", f"{rubber['approvazioni_rapide']} / {rubber['revisioni_con_tempo']}", "0 assoluto", "OK" if not rubber["approvazioni_rapide"] else "Allarme"],
+        ["A4d", "Fallimenti honeypot", f"falliti {rubber['honeypot_falliti']} / valutati {rubber['honeypot_valutati']}; rilevati {rubber['honeypot_rilevati']}; esposti {rubber['honeypot_esposti']}", "0 fallimenti", "OK" if not rubber["honeypot_falliti"] else "Allarme"],
         ["A5", "Escalation SLA scaduto", percentuale(len(in_escalation), len(hitl)), "< 15%", "OK" if not hitl or len(in_escalation) / len(hitl) < 0.15 else "Allarme"],
         ["A6", "Conformità alla matrice routing indipendente", percentuale(len(routing_ok), len(om.coda)), "100%", "OK" if len(routing_ok) == len(om.coda) else "Allarme"],
         ["A6b", "Distribuzione livelli", "; ".join(f"{livello} {numero}" for livello, numero in manager_kpi["distribuzione_livelli"].items()), "Esposta", "OK"],
@@ -1281,7 +1281,7 @@ with tab_coda:
                     key=f"kw{r.id}",
                     help="Selezionare almeno due parole chiave che giustificano la scelta."
                 )
-                cooldown_ok, cooldown_residuo = cooldown_pronto(r.id)
+                cooldown_ok, cooldown_residuo, tempo_esposizione = cooldown_pronto(r.id)
                 approvazione_disabilitata = not cooldown_ok or len(set(keywords)) < 2
                 if not cooldown_ok:
                     st.caption(f"Cooldown anti rubber-stamping: approvazione disponibile tra {cooldown_residuo} secondi.")
@@ -1291,16 +1291,19 @@ with tab_coda:
                 try:
                     if b1.button("Approva", key=f"ok{r.id}", disabled=approvazione_disabilitata):
                         om.revisiona(r.id, StatoDecisione.APPROVATA, operatore, mot,
-                                     evidenze_keywords=keywords)
+                                     evidenze_keywords=keywords,
+                                     tempo_esposizione_secondi=tempo_esposizione)
                         st.session_state["review_feedback"] = f"Decisione {r.asset_id} approvata."
                         st.rerun()
                     if b2.button("Modifica e approva", key=f"mod{r.id}", disabled=approvazione_disabilitata):
                         om.revisiona(r.id, StatoDecisione.MODIFICATA, operatore, mot,
-                                     azione_modificata=az, evidenze_keywords=keywords)
+                                     azione_modificata=az, evidenze_keywords=keywords,
+                                     tempo_esposizione_secondi=tempo_esposizione)
                         st.session_state["review_feedback"] = f"Decisione {r.asset_id} modificata e approvata."
                         st.rerun()
                     if b3.button("Rifiuta", key=f"no{r.id}"):
-                        om.revisiona(r.id, StatoDecisione.RIFIUTATA, operatore, mot)
+                        om.revisiona(r.id, StatoDecisione.RIFIUTATA, operatore, mot,
+                                     tempo_esposizione_secondi=tempo_esposizione)
                         st.session_state["review_feedback"] = f"Decisione {r.asset_id} rifiutata."
                         st.rerun()
                 except ValueError as e:

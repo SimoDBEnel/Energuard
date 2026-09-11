@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from oversight_manager import LivelloSupervisione, OversightManager, Raccomandazione, StatoDecisione
+from oversight_manager import (LivelloSupervisione, OversightManager, Raccomandazione,
+                               StatoDecisione, metriche_rubber_stamping)
 from audit_logger import AuditLogger
 
 
@@ -52,13 +53,72 @@ class TestOversightValidation(unittest.TestCase):
                          "Motivazione valida e specifica", evidenze_keywords=["rischio"])
 
     def test_honeypot_approvato_genera_allerta(self):
-        om = OversightManager(AuditLogger("test_audit_temp.jsonl"))
-        r = self._raccomandazione("A-4", honeypot=True)
-        om.coda.append(r)
-        with self.assertRaises(ValueError):
-            om.revisiona(r.id, StatoDecisione.APPROVATA, "OP-01",
-                         "Motivazione valida ma errata", evidenze_keywords=["rischio", "confidenza"])
-        self.assertEqual(r.stato, StatoDecisione.IN_ATTESA)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "audit.jsonl"
+            om = OversightManager(AuditLogger(str(path)))
+            r = self._raccomandazione("A-4", honeypot=True)
+            om.coda.append(r)
+            with self.assertRaises(ValueError):
+                om.revisiona(r.id, StatoDecisione.APPROVATA, "OP-01",
+                             "Motivazione valida ma errata", evidenze_keywords=["rischio", "confidenza"])
+            self.assertEqual(r.stato, StatoDecisione.IN_ATTESA)
+            record = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+            self.assertTrue(record["decisione"]["honeypot"])
+            self.assertEqual(record["extra"]["esito_tentato"], "APPROVATA")
+
+    def test_honeypot_non_si_aggira_con_modifica_e_approvazione(self):
+        with TemporaryDirectory() as directory:
+            om = OversightManager(AuditLogger(str(Path(directory) / "audit.jsonl")))
+            r = self._raccomandazione("A-HP-MOD", honeypot=True)
+            om.coda.append(r)
+            with self.assertRaises(ValueError):
+                om.revisiona(r.id, StatoDecisione.MODIFICATA, "OP-01",
+                             "Modifica apparentemente valida ma automatica",
+                             azione_modificata="nessuna_azione",
+                             evidenze_keywords=["rischio", "confidenza"])
+            self.assertEqual(r.stato, StatoDecisione.IN_ATTESA)
+
+    def test_raccomandazione_bloccata_da_stop_resta_in_coda(self):
+        with TemporaryDirectory() as directory:
+            om = OversightManager(AuditLogger(str(Path(directory) / "audit.jsonl")))
+            om.attiva_stop("area:Nord", "OP-01", "Stop area per anomalia operativa confermata")
+            r = self._raccomandazione("A-HP-STOP", honeypot=True)
+
+            om.sottometti(r)
+
+            self.assertIn(r, om.coda)
+            self.assertEqual(r.stato, StatoDecisione.BLOCCATA_STOP)
+            self.assertIsNotNone(r.livello)
+
+    def test_metriche_rubber_stamping_separano_i_fenomeni(self):
+        records = [
+            {"attore": "OP-01", "evento": "revisione_APPROVATA",
+             "decisione": {"id": "1", "motivazione": "testo breve"},
+             "extra": {"tempo_esposizione_secondi": 4}},
+            {"attore": "OP-01", "evento": "revisione_MODIFICATA",
+             "decisione": {"id": "2", "motivazione": "testo breve"},
+             "extra": {"tempo_esposizione_secondi": 14}},
+            {"attore": "OP-02", "evento": "revisione_APPROVATA",
+             "decisione": {"id": "3", "motivazione": "testo breve"},
+             "extra": {}},
+            {"attore": "OP-01", "evento": "allerta_honeypot_approvato",
+             "decisione": {"id": "hp-1", "asset_id": "HP-A", "honeypot": True}},
+            {"attore": "OP-01", "evento": "revisione_RIFIUTATA",
+             "decisione": {"id": "hp-2", "asset_id": "HP-B", "honeypot": True}},
+            {"attore": "SISTEMA", "evento": "in_coda_HITL",
+             "decisione": {"id": "hp-3", "asset_id": "HP-C", "honeypot": True}},
+        ]
+
+        metriche = metriche_rubber_stamping(records)
+
+        self.assertEqual(metriche["motivazioni_brevi"], 3)
+        self.assertEqual(metriche["motivazioni_duplicate"], 1)
+        self.assertEqual(metriche["approvazioni_rapide"], 1)
+        self.assertEqual(metriche["revisioni_con_tempo"], 2)
+        self.assertEqual(metriche["honeypot_esposti"], 3)
+        self.assertEqual(metriche["honeypot_valutati"], 2)
+        self.assertEqual(metriche["honeypot_falliti"], 1)
+        self.assertEqual(metriche["honeypot_rilevati"], 1)
 
     def test_emergency_stop_multi_filtro_usa_and_tra_dimensioni(self):
         om = OversightManager(AuditLogger("test_audit_temp.jsonl"))

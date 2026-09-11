@@ -45,6 +45,63 @@ AZIONI = ["nessuna_azione", "ispezione_routine", "programma_manutenzione",
           "riduci_carico", "ispezione_urgente"]
 
 
+def metriche_rubber_stamping(records: Iterable[dict], soglia_breve: int = 30,
+                              soglia_rapida_secondi: int = 10) -> dict:
+    """Calcola separatamente segnali testuali, temporali e controlli honeypot."""
+    revisioni_approvative = [record for record in records if record.get("evento") in (
+        "revisione_APPROVATA", "revisione_MODIFICATA")]
+    motivazioni = []
+    for record in revisioni_approvative:
+        motivazione = record.get("decisione", {}).get("motivazione")
+        if isinstance(motivazione, str) and motivazione.strip():
+            motivazioni.append((record.get("attore", "-"), motivazione.strip()))
+
+    brevi = sum(len(motivazione) < soglia_breve for _, motivazione in motivazioni)
+    viste = set()
+    duplicati = 0
+    for attore, motivazione in motivazioni:
+        chiave = (attore, " ".join(motivazione.split()).casefold())
+        duplicati += chiave in viste
+        viste.add(chiave)
+
+    rapide = 0
+    revisioni_con_tempo = 0
+    for record in revisioni_approvative:
+        tempo = record.get("extra", {}).get("tempo_esposizione_secondi")
+        if isinstance(tempo, (int, float)):
+            revisioni_con_tempo += 1
+            rapide += tempo < soglia_rapida_secondi
+
+    honeypot_esposti = set()
+    honeypot_falliti = set()
+    honeypot_rilevati = set()
+    for record in records:
+        decisione = record.get("decisione", {})
+        decision_id = decisione.get("id")
+        is_honeypot = bool(decisione.get("honeypot")) or str(
+            decisione.get("asset_id", "")).startswith("HP-")
+        if not decision_id or not is_honeypot:
+            continue
+        honeypot_esposti.add(decision_id)
+        if record.get("evento") == "allerta_honeypot_approvato":
+            honeypot_falliti.add(decision_id)
+        elif record.get("evento") == "revisione_RIFIUTATA":
+            honeypot_rilevati.add(decision_id)
+
+    return {
+        "revisioni_approvative": len(revisioni_approvative),
+        "motivazioni_valide": len(motivazioni),
+        "motivazioni_brevi": brevi,
+        "motivazioni_duplicate": duplicati,
+        "revisioni_con_tempo": revisioni_con_tempo,
+        "approvazioni_rapide": rapide,
+        "honeypot_esposti": len(honeypot_esposti),
+        "honeypot_valutati": len(honeypot_falliti | honeypot_rilevati),
+        "honeypot_falliti": len(honeypot_falliti),
+        "honeypot_rilevati": len(honeypot_rilevati),
+    }
+
+
 @dataclass
 class Raccomandazione:
     asset_id: str
@@ -184,7 +241,9 @@ class OversightManager:
     def sottometti(self, r: Raccomandazione):
         """Instrada la raccomandazione e la esegue o la mette in coda."""
         if self._stop_applicabile(r):
+            self.route(r)
             r.stato = StatoDecisione.BLOCCATA_STOP
+            self.coda.append(r)
             self.audit.log("SISTEMA", "blocco_emergency_stop", r)
             return r
 
@@ -201,17 +260,20 @@ class OversightManager:
     def revisiona(self, decision_id: str, esito: StatoDecisione,
                   revisore: str, motivazione: str,
                   azione_modificata: Optional[str] = None,
-                  evidenze_keywords: Optional[list[str]] = None):
+                  evidenze_keywords: Optional[list[str]] = None,
+                  tempo_esposizione_secondi: Optional[float] = None):
         """Registra il giudizio umano. La motivazione e' OBBLIGATORIA."""
         testo = self._valida_motivazione(motivazione)
         keywords = self._valida_evidenze_keywords(esito, evidenze_keywords)
         r = self._trova(decision_id)
         if r.stato not in (StatoDecisione.IN_ATTESA, StatoDecisione.ESCALATION):
             raise ValueError(f"Decisione {decision_id} gia' chiusa: {r.stato}")
-        if r.honeypot and esito == StatoDecisione.APPROVATA:
+        if r.honeypot and esito in (StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA):
             r.revisore, r.motivazione, r.evidenze_keywords = revisore, testo, keywords
             self.audit.log(revisore, "allerta_honeypot_approvato", r,
-                           extra={"messaggio": r.honeypot_messaggio})
+                           extra={"messaggio": r.honeypot_messaggio,
+                                  "esito_tentato": esito.value,
+                                  "tempo_esposizione_secondi": tempo_esposizione_secondi})
             self._storico_motivazioni.append((datetime.now(), testo))
             raise ValueError("ALLERTA RUBBER STAMPING: questa raccomandazione era "
                              "un controllo honeypot palesemente incoerente.")
@@ -223,7 +285,8 @@ class OversightManager:
             r.azione_proposta = azione_modificata
         if esito in (StatoDecisione.APPROVATA, StatoDecisione.MODIFICATA):
             self._esegui(r)
-        self.audit.log(revisore, f"revisione_{esito.value}", r)
+        self.audit.log(revisore, f"revisione_{esito.value}", r,
+                   extra={"tempo_esposizione_secondi": tempo_esposizione_secondi})
         return r
 
     def minuti_residui_sla(self, r: Raccomandazione, adesso: Optional[datetime] = None) -> Optional[int]:

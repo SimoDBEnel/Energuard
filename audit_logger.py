@@ -51,6 +51,7 @@ class AuditLogger:
                     "confidenza": raccomandazione.confidenza,
                     "motivazione": raccomandazione.motivazione,
                     "spiegazione": raccomandazione.spiegazione,
+                    "honeypot": bool(getattr(raccomandazione, "honeypot", False)),
                 }
                 if getattr(raccomandazione, "messaggio_llm", None):
                     record["decisione"]["messaggio_llm"] = raccomandazione.messaggio_llm
